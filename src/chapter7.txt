@@ -1,0 +1,608 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：非对齐与对齐访问的比较
+__global__ void memoryAccessKernel(float *input, float *output, int N) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // 非对齐访问
+    if (tid < N) {
+        output[tid] = input[tid];
+    }
+}
+__global__ void memoryAccessAligned(float *input, float *output, int N) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // 对齐访问
+    if (tid < N) {
+        output[tid] = input[tid];
+    }
+}
+int main() {
+    const int N = 1 << 20; // 1M元素
+    const size_t bytes = N * sizeof(float);
+    // 主机内存分配
+    std::vector<float> hostInput(N, 1.0f);
+    std::vector<float> hostOutput(N);
+    // 设备内存分配
+    float *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput.data(), bytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    // 非对齐访问
+    memoryAccessKernel<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput.data(), deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印部分结果
+    std::cout << "Output (unaligned): ";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 对齐访问
+    memoryAccessAligned<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput.data(), deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印部分结果
+    std::cout << "Output (aligned): ";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：非对齐访问
+__global__ void nonCoalescedAccess(const float *input, float *output, int N, int stride) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < N) {
+        output[tid] = input[tid * stride];
+    }
+}
+// 核函数：对齐访问优化
+__global__ void coalescedAccess(const float *input, float *output, int N) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < N) {
+        output[tid] = input[tid];
+    }
+}
+int main() {
+    const int N = 1 << 20; // 1M元素
+    const int stride = 2; // 非对齐步长
+    const size_t bytes = N * sizeof(float);
+    // 主机内存分配
+    std::vector<float> hostInput(N * stride, 1.0f);
+    std::vector<float> hostOutput(N);
+    // 设备内存分配
+    float *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, N * stride * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput.data(), N * stride * sizeof(float), cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    // 非对齐访问
+    nonCoalescedAccess<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N, stride);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput.data(), deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印非对齐结果
+    std::cout << "Output (non-coalesced): ";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 对齐访问
+    coalescedAccess<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput.data(), deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印对齐结果
+    std::cout << "Output (coalesced): ";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：共享内存存在Bank冲突
+__global__ void bankConflictKernel(float *output, int N) {
+    __shared__ float sharedMemory[32]; // 每个Bank对应一个float
+    int tid = threadIdx.x;
+    // Bank冲突：所有线程访问同一Bank不同地址
+    sharedMemory[tid * 2 % 32] = tid;
+    __syncthreads();
+    if (tid < N) {
+        output[tid] = sharedMemory[tid * 2 % 32];
+    }
+}
+// 核函数：优化后的共享内存访问
+__global__ void optimizedKernel(float *output, int N) {
+    __shared__ float sharedMemory[32]; // 每个Bank对应一个float
+    int tid = threadIdx.x;
+    // 无Bank冲突：访问模式调整为对齐方式
+    sharedMemory[tid] = tid;
+    __syncthreads();
+    if (tid < N) {
+        output[tid] = sharedMemory[tid];
+    }
+}
+int main() {
+    const int N = 32;
+    const size_t bytes = N * sizeof(float);
+    // 主机内存分配
+    float *hostOutput = new float[N];
+    // 设备内存分配
+    float *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    // 设置线程块大小
+    const int blockSize = 32;
+    const int gridSize = 1;
+    // 执行含Bank冲突的核函数
+    bankConflictKernel<<<gridSize, blockSize>>>(deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    std::cout << "Output with Bank Conflict:" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 执行优化后的核函数
+    optimizedKernel<<<gridSize, blockSize>>>(deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    std::cout << "Output without Bank Conflict:" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：原始矩阵转置
+__global__ void matrixTransposeConflict(float *input, float *output, int N) {
+    __shared__ float sharedMemory[32][32]; // 共享内存分配
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x < N && y < N) {
+        sharedMemory[threadIdx.y][threadIdx.x] = input[y * N + x];
+        __syncthreads();
+        output[x * N + y] = sharedMemory[threadIdx.y][threadIdx.x];
+    }
+}
+int main() {
+    const int N = 32;
+    const size_t bytes = N * N * sizeof(float);
+    // 主机内存分配并初始化
+    float *hostInput = new float[N * N];
+    float *hostOutput = new float[N * N];
+    for (int i = 0; i < N * N; ++i) {
+        hostInput[i] = static_cast<float>(i);
+    }
+    // 设备内存分配
+    float *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    dim3 blockSize(32, 32);
+    dim3 gridSize((N + 31) / 32, (N + 31) / 32);
+    // 执行原始核函数
+    matrixTransposeConflict<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印结果
+    std::cout << "Output with Bank Conflict (First 10 Elements):" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostInput;
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+__global__ void matrixTransposeOptimized(float *input, float *output, int N) {
+    __shared__ float sharedMemory[32][33]; // 添加偏移量
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x < N && y < N) {
+        sharedMemory[threadIdx.y][threadIdx.x] = input[y * N + x];
+        __syncthreads();
+        output[x * N + y] = sharedMemory[threadIdx.y][threadIdx.x];
+    }
+}
+int main() {
+    const int N = 32;
+    const size_t bytes = N * N * sizeof(float);
+    // 主机内存分配并初始化
+    float *hostInput = new float[N * N];
+    float *hostOutput = new float[N * N];
+    for (int i = 0; i < N * N; ++i) {
+        hostInput[i] = static_cast<float>(i);
+    }
+    // 设备内存分配
+    float *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    dim3 blockSize(32, 32);
+    dim3 gridSize((N + 31) / 32, (N + 31) / 32);
+    // 执行优化后的核函数
+    matrixTransposeOptimized<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印结果
+    std::cout << "Output without Bank Conflict (First 10 Elements):" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostInput;
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：使用共享内存进行块矩阵转置
+__global__ void blockMatrixTranspose(float *input, float *output, int N) {
+    // 定义共享内存，动态大小
+    __shared__ float tile[32][32];
+    // 全局索引
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    // 线程块内索引
+    int localX = threadIdx.x;
+    int localY = threadIdx.y;
+    // 加载数据到共享内存
+    if (x < N && y < N) {
+        tile[localY][localX] = input[y * N + x];
+    }
+    __syncthreads();
+    // 转置后写回全局内存
+    if (x < N && y < N) {
+        output[x * N + y] = tile[localX][localY];
+    }
+}
+int main() {
+    const int N = 64; // 矩阵维度
+    const size_t bytes = N * N * sizeof(float);
+    // 主机内存分配并初始化
+    float *hostInput = new float[N * N];
+    float *hostOutput = new float[N * N];
+    for (int i = 0; i < N * N; ++i) {
+        hostInput[i] = static_cast<float>(i);
+    }
+    // 打印输入矩阵
+    std::cout << "Input Matrix:" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            std::cout << hostInput[i * N + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    // 设备内存分配
+    float *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    dim3 blockSize(32, 32); // 每个线程块32x32
+    dim3 gridSize((N + 31) / 32, (N + 31) / 32);
+    // 执行核函数
+    blockMatrixTranspose<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印输出矩阵
+    std::cout << "Output Matrix (Transposed):" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            std::cout << hostOutput[i * N + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostInput;
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：使用共享内存进行矩阵转置和求和
+__global__ void matrixTransposeAndSum(float *input, float *output, float *sum, int N) {
+    __shared__ float tile[32][33]; // 添加偏移量避免Bank冲突
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int localX = threadIdx.x;
+    int localY = threadIdx.y;
+    // 初始化求和的共享变量
+    __shared__ float blockSum;
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        blockSum = 0.0f;
+    }
+    __syncthreads();
+    // 加载数据到共享内存并计算块内求和
+    if (x < N && y < N) {
+        float value = input[y * N + x];
+        tile[localY][localX] = value;
+        atomicAdd(&blockSum, value); // 原子操作进行块内求和
+    }
+    __syncthreads();
+    // 写回转置数据
+    if (x < N && y < N) {
+        output[x * N + y] = tile[localX][localY];
+    }
+    // 累加块内求和结果到全局内存
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        atomicAdd(sum, blockSum);
+    }
+}
+int main() {
+    const int N = 64; // 矩阵维度
+    const size_t bytes = N * N * sizeof(float);
+    // 主机内存分配并初始化
+    float *hostInput = new float[N * N];
+    float *hostOutput = new float[N * N];
+    float hostSum = 0.0f;
+    for (int i = 0; i < N * N; ++i) {
+        hostInput[i] = static_cast<float>(i + 1);
+    }
+    // 打印输入矩阵
+    std::cout << "Input Matrix:" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            std::cout << hostInput[i * N + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    // 设备内存分配
+    float *deviceInput, *deviceOutput, *deviceSum;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceSum, sizeof(float)));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceSum, &hostSum, sizeof(float), cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    dim3 blockSize(32, 32); // 每个线程块32x32
+    dim3 gridSize((N + 31) / 32, (N + 31) / 32);
+    // 执行核函数
+    matrixTransposeAndSum<<<gridSize, blockSize>>>(deviceInput, deviceOutput, deviceSum, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&hostSum, deviceSum, sizeof(float), cudaMemcpyDeviceToHost));
+    // 打印转置后的矩阵
+    std::cout << "Output Matrix (Transposed):" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            std::cout << hostOutput[i * N + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    // 打印矩阵总和
+    std::cout << "Sum of Matrix Elements: " << hostSum << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    CUDA_CHECK(cudaFree(deviceSum));
+    delete[] hostInput;
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cmath>
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：计算 A^T * A 的块矩阵乘法
+__global__ void matrixMultiplyShared(float *A, float *result, int N) {
+    __shared__ float sharedA[32][32]; // 定义共享内存块
+    __shared__ float sharedB[32][32]; // A的转置部分存储
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int row = blockIdx.y * blockDim.y + ty;
+    int col = blockIdx.x * blockDim.x + tx;
+    float value = 0.0;
+    for (int block = 0; block < (N + 31) / 32; ++block) {
+        if (row < N && block * 32 + tx < N) {
+            sharedA[ty][tx] = A[row * N + block * 32 + tx];
+        } else {
+            sharedA[ty][tx] = 0.0;
+        }
+        if (col < N && block * 32 + ty < N) {
+            sharedB[ty][tx] = A[(block * 32 + ty) * N + col];
+        } else {
+            sharedB[ty][tx] = 0.0;
+        }
+        __syncthreads();
+        for (int i = 0; i < 32; ++i) {
+            value += sharedA[ty][i] * sharedB[i][tx];
+        }
+        __syncthreads();
+    }
+    if (row < N && col < N) {
+        result[row * N + col] = value;
+    }
+}
+int main() {
+    const int N = 64; // 矩阵维度
+    const size_t bytes = N * N * sizeof(float);
+    // 主机内存分配并初始化
+    float *hostA = new float[N * N];
+    float *hostResult = new float[N * N];
+    for (int i = 0; i < N * N; ++i) {
+        hostA[i] = static_cast<float>(rand() % 100) / 10.0; // 随机初始化
+    }
+    // 打印输入矩阵
+    std::cout << "Input Matrix A:" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            std::cout << hostA[i * N + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    // 设备内存分配
+    float *deviceA, *deviceResult;
+    CUDA_CHECK(cudaMalloc(&deviceA, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceResult, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceA, hostA, bytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    dim3 blockSize(32, 32);
+    dim3 gridSize((N + 31) / 32, (N + 31) / 32);
+    // 执行核函数
+    matrixMultiplyShared<<<gridSize, blockSize>>>(deviceA, deviceResult, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostResult, deviceResult, bytes, cudaMemcpyDeviceToHost));
+    // 打印结果矩阵
+    std::cout << "Result Matrix A^T * A:" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            std::cout << hostResult[i * N + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceA));
+    CUDA_CHECK(cudaFree(deviceResult));
+    delete[] hostA;
+    delete[] hostResult;
+    return 0;
+}
+

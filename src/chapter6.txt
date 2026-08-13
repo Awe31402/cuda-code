@@ -1,0 +1,562 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <chrono>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：矩阵加法
+__global__ void matrixAdd(const float *a, const float *b, float *c, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+int main() {
+    const int N = 1 << 20; // 矩阵大小
+    const int bytes = N * sizeof(float);
+    // 主机内存分配
+    float *hostA = new float[N];
+    float *hostB = new float[N];
+    float *hostC = new float[N];
+    for (int i = 0; i < N; ++i) {
+        hostA[i] = static_cast<float>(i);
+        hostB[i] = static_cast<float>(i * 2);
+    }
+    // 设备内存分配
+    float *deviceA, *deviceB, *deviceC;
+    CUDA_CHECK(cudaMalloc((void **)&deviceA, bytes));
+    CUDA_CHECK(cudaMalloc((void **)&deviceB, bytes));
+    CUDA_CHECK(cudaMalloc((void **)&deviceC, bytes));
+    // 测试数据传输时间
+    auto start = std::chrono::high_resolution_clock::now();
+    CUDA_CHECK(cudaMemcpy(deviceA, hostA, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceB, hostB, bytes, cudaMemcpyHostToDevice));
+    auto end = std::chrono::high_resolution_clock::now();
+    double transferTime = std::chrono::duration<double, std::milli>(end - start).count();
+    // 设置线程块和网格大小
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    // 测试计算时间
+    start = std::chrono::high_resolution_clock::now();
+    matrixAdd<<<gridSize, blockSize>>>(deviceA, deviceB, deviceC, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    end = std::chrono::high_resolution_clock::now();
+    double computeTime = std::chrono::duration<double, std::milli>(end - start).count();
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostC, deviceC, bytes, cudaMemcpyDeviceToHost));
+    // 输出结果
+    std::cout << "Transfer Time (ms): " << transferTime << std::endl;
+    std::cout << "Compute Time (ms): " << computeTime << std::endl;
+    std::cout << "Data Transfer to Compute Ratio: " << transferTime / computeTime << std::endl;
+    // 打印部分结果
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "C[" << i << "]: " << hostC[i] << std::endl;
+    }
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceA));
+    CUDA_CHECK(cudaFree(deviceB));
+    CUDA_CHECK(cudaFree(deviceC));
+    delete[] hostA;
+    delete[] hostB;
+    delete[] hostC;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：矩阵块乘法
+__global__ void matrixMultiplyBlock(const float *a, const float *b, float *c, int N, int M, int K) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < N && col < K) {
+        float sum = 0.0f;
+        for (int i = 0; i < M; ++i) {
+            sum += a[row * M + i] * b[i * K + col];
+        }
+        c[row * K + col] = sum;
+    }
+}
+int main() {
+    const int N = 512; // 矩阵A的行数
+    const int M = 512; // 矩阵A的列数和矩阵B的行数
+    const int K = 512; // 矩阵B的列数
+    const int blockSize = 16; // 线程块大小
+    const int blockCount = 4; // 分块数量
+    const size_t bytesA = N * M * sizeof(float);
+    const size_t bytesB = M * K * sizeof(float);
+    const size_t bytesC = N * K * sizeof(float);
+    // 主机内存分配
+    std::vector<float> hostA(N * M, 1.0f);
+    std::vector<float> hostB(M * K, 2.0f);
+    std::vector<float> hostC(N * K, 0.0f);
+    // 设备内存分配
+    float *deviceA, *deviceB, *deviceC;
+    CUDA_CHECK(cudaMalloc(&deviceA, bytesA));
+    CUDA_CHECK(cudaMalloc(&deviceB, bytesB));
+    CUDA_CHECK(cudaMalloc(&deviceC, bytesC));
+    // 分块传输与计算
+    dim3 threads(blockSize, blockSize);
+    dim3 grid((K + blockSize - 1) / blockSize, (N / blockCount + blockSize - 1) / blockSize);
+    cudaStream_t streams[blockCount];
+    for (int i = 0; i < blockCount; ++i) {
+        CUDA_CHECK(cudaStreamCreate(&streams[i]));
+    }
+    for (int i = 0; i < blockCount; ++i) {
+        int offset = i * (N / blockCount) * M;
+        CUDA_CHECK(cudaMemcpyAsync(deviceA + offset, hostA.data() + offset, (N / blockCount) * M * sizeof(float), cudaMemcpyHostToDevice, streams[i]));
+    }
+    CUDA_CHECK(cudaMemcpyAsync(deviceB, hostB.data(), bytesB, cudaMemcpyHostToDevice));
+    for (int i = 0; i < blockCount; ++i) {
+        int offsetA = i * (N / blockCount) * M;
+        int offsetC = i * (N / blockCount) * K;
+        matrixMultiplyBlock<<<grid, threads, 0, streams[i]>>>(deviceA + offsetA, deviceB, deviceC + offsetC, N / blockCount, M, K);
+    }
+    for (int i = 0; i < blockCount; ++i) {
+        int offset = i * (N / blockCount) * K;
+        CUDA_CHECK(cudaMemcpyAsync(hostC.data() + offset, deviceC + offset, (N / blockCount) * K * sizeof(float), cudaMemcpyDeviceToHost, streams[i]));
+    }
+    for (int i = 0; i < blockCount; ++i) {
+        CUDA_CHECK(cudaStreamSynchronize(streams[i]));
+        CUDA_CHECK(cudaStreamDestroy(streams[i]));
+    }
+    // 打印部分结果
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostC[i] << " ";
+    }
+    std::cout << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceA));
+    CUDA_CHECK(cudaFree(deviceB));
+    CUDA_CHECK(cudaFree(deviceC));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：矩阵向量乘法
+__global__ void matVecMultiplyShared(const float *matrix, const float *vector, float *result, int N) {
+    __shared__ float sharedVector[1024]; // 共享内存，用于存储向量数据
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < N) {
+        float sum = 0.0f;
+        // 加载向量到共享内存
+        if (threadIdx.x < N) {
+            sharedVector[threadIdx.x] = vector[threadIdx.x];
+        }
+        __syncthreads();
+        // 计算矩阵行与向量的点积
+        for (int i = 0; i < N; ++i) {
+            sum += matrix[row * N + i] * sharedVector[i];
+        }
+        result[row] = sum;
+    }
+}
+int main() {
+    const int N = 1024; // 矩阵和向量大小
+    const size_t matrixBytes = N * N * sizeof(float);
+    const size_t vectorBytes = N * sizeof(float);
+    const size_t resultBytes = N * sizeof(float);
+    // 主机内存分配
+    std::vector<float> hostMatrix(N * N, 1.0f);
+    std::vector<float> hostVector(N, 1.0f);
+    std::vector<float> hostResult(N, 0.0f);
+    // 设备内存分配
+    float *deviceMatrix, *deviceVector, *deviceResult;
+    CUDA_CHECK(cudaMalloc(&deviceMatrix, matrixBytes));
+    CUDA_CHECK(cudaMalloc(&deviceVector, vectorBytes));
+    CUDA_CHECK(cudaMalloc(&deviceResult, resultBytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceMatrix, hostMatrix.data(), matrixBytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceVector, hostVector.data(), vectorBytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    // 启动核函数
+    matVecMultiplyShared<<<gridSize, blockSize>>>(deviceMatrix, deviceVector, deviceResult, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostResult.data(), deviceResult, resultBytes, cudaMemcpyDeviceToHost));
+    // 打印部分结果
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "Result[" << i << "] = " << hostResult[i] << std::endl;
+    }
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceMatrix));
+    CUDA_CHECK(cudaFree(deviceVector));
+    CUDA_CHECK(cudaFree(deviceResult));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：使用共享内存实现向量归约
+__global__ void vectorReduction(const float *input, float *output, int N) {
+    extern __shared__ float sharedData[]; // 动态分配共享内存
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // 将全局内存的数据加载到共享内存
+    sharedData[tid] = (idx < N) ? input[idx] : 0.0f;
+    __syncthreads();
+    // 在共享内存中进行归约操作
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sharedData[tid] += sharedData[tid + stride];
+        }
+        __syncthreads();
+    }
+    // 将每个块的归约结果写回全局内存
+    if (tid == 0) {
+        output[blockIdx.x] = sharedData[0];
+    }
+}
+int main() {
+    const int N = 1 << 20; // 向量大小
+    const int blockSize = 256; // 每个块的线程数
+    const int gridSize = (N + blockSize - 1) / blockSize; // 网格大小
+    const size_t bytesInput = N * sizeof(float);
+    const size_t bytesOutput = gridSize * sizeof(float);
+    // 主机内存分配
+    std::vector<float> hostInput(N, 1.0f); // 初始化向量，所有值为1
+    std::vector<float> hostOutput(gridSize, 0.0f);
+    // 设备内存分配
+    float *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytesInput));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytesOutput));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput.data(), bytesInput, cudaMemcpyHostToDevice));
+    // 启动核函数
+    size_t sharedMemoryBytes = blockSize * sizeof(float); // 每个块的共享内存大小
+    vectorReduction<<<gridSize, blockSize, sharedMemoryBytes>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput.data(), deviceOutput, bytesOutput, cudaMemcpyDeviceToHost));
+    // 对主机上的块结果进行最终归约
+    float finalResult = 0.0f;
+    for (const auto &val : hostOutput) {
+        finalResult += val;
+    }
+    // 打印结果
+    std::cout << "Final Reduction Result: " << finalResult << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：优化后的Warp收敛
+__global__ void optimizedWarpConvergence(const int *input, int *output, int N) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int warpId = tid / 32; // 计算Warp的ID
+    if (tid < N) {
+        int result = 0;
+        // 避免分支发散，使用条件运算符
+        result = (input[tid] % 2 == 0) ? input[tid] * 2 : input[tid] * 3;
+        // 将结果写入输出数组
+        output[tid] = result;
+    }
+}
+int main() {
+    const int N = 1024; // 数据大小
+    const size_t bytes = N * sizeof(int);
+    // 主机内存分配
+    std::vector<int> hostInput(N);
+    std::vector<int> hostOutput(N);
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = i;
+    }
+    // 设备内存分配
+    int *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput.data(), bytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    // 启动核函数
+    optimizedWarpConvergence<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput.data(), deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印部分结果
+    std::cout << "Output: ";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：指令融合与条件分支规约优化
+__global__ void optimizedConditionFusion(const float *input, float *output, int N) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < N) {
+        // 条件分支规约，通过条件运算符替代if-else语句
+        output[tid] = (input[tid] > 0.5f) ? input[tid] * 2.0f : input[tid] * 0.5f;
+    }
+}
+int main() {
+    const int N = 1024; // 数据大小
+    const size_t bytes = N * sizeof(float);
+    // 主机内存分配
+    std::vector<float> hostInput(N);
+    std::vector<float> hostOutput(N);
+    // 初始化输入数据
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = static_cast<float>(i) / N;
+    }
+    // 设备内存分配
+    float *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput.data(), bytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    // 启动核函数
+    optimizedConditionFusion<<<gridSize, blockSize>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput.data(), deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 打印部分结果
+    std::cout << "Output: ";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostOutput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#include <chrono>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：矩阵乘法
+__global__ void matrixMultiply(const float *A, const float *B, float *C, int N) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < N && col < N) {
+        float sum = 0.0f;
+        for (int i = 0; i < N; ++i) {
+            sum += A[row * N + i] * B[i * N + col];
+        }
+        C[row * N + col] = sum;
+    }
+}
+int main() {
+    const int N = 1024; // 矩阵大小
+    const size_t bytes = N * N * sizeof(float);
+    // 主机内存分配
+    std::vector<float> hostA(N * N, 1.0f);
+    std::vector<float> hostB(N * N, 1.0f);
+    std::vector<float> hostC(N * N, 0.0f);
+    // 设备内存分配
+    float *deviceA, *deviceB, *deviceC;
+    CUDA_CHECK(cudaMalloc(&deviceA, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceB, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceC, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceA, hostA.data(), bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceB, hostB.data(), bytes, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    dim3 threads(16, 16); // 线程块大小
+    dim3 grid((N + threads.x - 1) / threads.x, (N + threads.y - 1) / threads.y);
+    // 记录开始时间
+    auto start = std::chrono::high_resolution_clock::now();
+    // 启动核函数
+    matrixMultiply<<<grid, threads>>>(deviceA, deviceB, deviceC, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 记录结束时间
+    auto end = std::chrono::high_resolution_clock::now();
+    double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostC.data(), deviceC, bytes, cudaMemcpyDeviceToHost));
+    // 打印部分结果
+    std::cout << "Elapsed time: " << elapsed << " ms" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostC[i] << " ";
+    }
+    std::cout << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceA));
+    CUDA_CHECK(cudaFree(deviceB));
+    CUDA_CHECK(cudaFree(deviceC));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：矩阵加法
+__global__ void matrixAdd(const float *A, const float *B, float *C, int rows, int cols) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows && col < cols) {
+        int idx = row * cols + col;
+        C[idx] = A[idx] + B[idx];
+    }
+}
+int main() {
+    int rows = 1024; // 矩阵行数
+    int cols = 1024; // 矩阵列数
+    const size_t bytes = rows * cols * sizeof(float);
+    // 主机内存分配
+    std::vector<float> hostA(rows * cols, 1.0f);
+    std::vector<float> hostB(rows * cols, 2.0f);
+    std::vector<float> hostC(rows * cols);
+    // 设备内存分配
+    float *deviceA, *deviceB, *deviceC;
+    CUDA_CHECK(cudaMalloc(&deviceA, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceB, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceC, bytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceA, hostA.data(), bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceB, hostB.data(), bytes, cudaMemcpyHostToDevice));
+    // 动态调整线程块和网格大小
+    int blockSize = 16;
+    if (rows * cols > 1 << 20) {
+        blockSize = 32;
+    }
+    dim3 threads(blockSize, blockSize);
+    dim3 grid((cols + threads.x - 1) / threads.x, (rows + threads.y - 1) / threads.y);
+    // 启动核函数
+    matrixAdd<<<grid, threads>>>(deviceA, deviceB, deviceC, rows, cols);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostC.data(), deviceC, bytes, cudaMemcpyDeviceToHost));
+    // 打印部分结果
+    std::cout << "Output: ";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << hostC[i] << " ";
+    }
+    std::cout << std::endl;
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceA));
+    CUDA_CHECK(cudaFree(deviceB));
+    CUDA_CHECK(cudaFree(deviceC));
+    return 0;
+}

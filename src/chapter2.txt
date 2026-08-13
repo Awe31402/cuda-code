@@ -1,0 +1,761 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <chrono>
+// 核函数：计算每个线程的全局索引
+__global__ void computeGlobalIndex(int *output, int totalThreads) {
+    int threadId = threadIdx.x + blockIdx.x * blockDim.x;
+    if (threadId < totalThreads) {
+        output[threadId] = threadId; // 每个线程存储其全局索引
+    }
+}
+// 核函数：简单计算，模拟工作负载
+__global__ void performWorkload(int *data, int totalThreads) {
+    int threadId = threadIdx.x + blockIdx.x * blockDim.x;
+    if (threadId < totalThreads) {
+        for (int i = 0; i < 1000; ++i) { // 模拟计算工作负载
+            data[threadId] += i;
+        }
+    }
+}
+void printDeviceProperties() {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    std::cout << "设备名称: " << prop.name << std::endl;
+    std::cout << "多处理器数量(SM): " << prop.multiProcessorCount << std::endl;
+    std::cout << "每个SM最大线程数: " << prop.maxThreadsPerMultiProcessor << std::endl;
+    std::cout << "每个线程块最大线程数: " << prop.maxThreadsPerBlock << std::endl;
+    std::cout << "每个线程块最大维度: (" << prop.maxThreadsDim[0] << ", "
+              << prop.maxThreadsDim[1] << ", " << prop.maxThreadsDim[2] << ")" << std::endl;
+    std::cout << "每个网格最大维度: (" << prop.maxGridSize[0] << ", "
+              << prop.maxGridSize[1] << ", " << prop.maxGridSize[2] << ")" << std::endl;
+}
+int main() {
+    // 查询设备属性
+    printDeviceProperties();
+    // 配置线程块和网格
+    int totalThreads = 1024 * 32; // 假设需要计算的总线程数
+    int threadsPerBlock = 256;    // 每个线程块的线程数
+    int numBlocks = (totalThreads + threadsPerBlock - 1) / threadsPerBlock;
+    std::cout << "总线程数: " << totalThreads << std::endl;
+    std::cout << "线程块大小: " << threadsPerBlock << std::endl;
+    std::cout << "网格大小: " << numBlocks << std::endl;
+    // 分配主机和设备内存
+    int *hostOutput = new int[totalThreads];
+    int *deviceOutput;
+    cudaMalloc(&deviceOutput, totalThreads * sizeof(int));
+    // 启动核函数
+    auto start = std::chrono::high_resolution_clock::now();
+    computeGlobalIndex<<<numBlocks, threadsPerBlock>>>(deviceOutput, totalThreads);
+    cudaDeviceSynchronize();
+    auto end = std::chrono::high_resolution_clock::now();
+    // 拷贝数据回主机
+    cudaMemcpy(hostOutput, deviceOutput, totalThreads * sizeof(int), cudaMemcpyDeviceToHost);
+    // 打印部分结果
+    std::cout << "线程全局索引示例:" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "线程 " << i << " 的全局索引: " << hostOutput[i] << std::endl;
+    }
+    // 性能测试
+    std::cout << "计算全局索引耗时: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()
+              << " ms" << std::endl;
+    // 模拟工作负载
+    start = std::chrono::high_resolution_clock::now();
+    performWorkload<<<numBlocks, threadsPerBlock>>>(deviceOutput, totalThreads);
+    cudaDeviceSynchronize();
+    end = std::chrono::high_resolution_clock::now();
+    std::cout << "执行工作负载耗时: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()
+              << " ms" << std::endl;
+    // 清理内存
+    cudaFree(deviceOutput);
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <chrono>
+// 核函数1: 计算线程全局索引并模拟不同分支
+__global__ void computeThreadLifecycle(int *globalIndex, int *branchResult, int totalThreads) {
+    int threadId = threadIdx.x + blockIdx.x * blockDim.x; // 计算全局索引
+    if (threadId < totalThreads) {
+        globalIndex[threadId] = threadId; // 保存全局索引
+        // 模拟条件分支，判断线程ID的奇偶性
+        if (threadId % 2 == 0) {
+            branchResult[threadId] = threadId * 2; // 偶数分支
+        } else {
+            branchResult[threadId] = threadId * 3; // 奇数分支
+        }
+    }
+}
+// 核函数2: 线程分组操作
+__global__ void groupThreads(int *groupedData, int totalThreads) {
+    int threadId = threadIdx.x + blockIdx.x * blockDim.x; // 全局索引
+    if (threadId < totalThreads) {
+        int groupId = threadIdx.x / 32; // 以Warp为单位进行分组
+        groupedData[threadId] = groupId; // 保存每个线程的组ID
+    }
+}
+void printDeviceProperties() {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    std::cout << "设备名称: " << prop.name << std::endl;
+    std::cout << "流式多处理器数量(SM): " << prop.multiProcessorCount << std::endl;
+    std::cout << "每个线程块最大线程数: " << prop.maxThreadsPerBlock << std::endl;
+}
+int main() {
+    // 查询设备属性
+    printDeviceProperties();
+    // 配置线程和线程块
+    int totalThreads = 1024;       // 总线程数
+    int threadsPerBlock = 256;    // 每个线程块的线程数
+    int numBlocks = (totalThreads + threadsPerBlock - 1) / threadsPerBlock;
+    std::cout << "总线程数: " << totalThreads << std::endl;
+    std::cout << "线程块大小: " << threadsPerBlock << std::endl;
+    std::cout << "网格大小: " << numBlocks << std::endl;
+    // 分配主机和设备内存
+    int *hostGlobalIndex = new int[totalThreads];
+    int *hostBranchResult = new int[totalThreads];
+    int *hostGroupedData = new int[totalThreads];
+    int *deviceGlobalIndex, *deviceBranchResult, *deviceGroupedData;
+    cudaMalloc(&deviceGlobalIndex, totalThreads * sizeof(int));
+    cudaMalloc(&deviceBranchResult, totalThreads * sizeof(int));
+    cudaMalloc(&deviceGroupedData, totalThreads * sizeof(int));
+    // 启动核函数1: 线程生命周期模拟
+    auto start = std::chrono::high_resolution_clock::now();
+    computeThreadLifecycle<<<numBlocks, threadsPerBlock>>>(deviceGlobalIndex, deviceBranchResult, totalThreads);
+    cudaDeviceSynchronize();
+    auto end = std::chrono::high_resolution_clock::now();
+    // 拷贝数据回主机
+    cudaMemcpy(hostGlobalIndex, deviceGlobalIndex, totalThreads * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hostBranchResult, deviceBranchResult, totalThreads * sizeof(int), cudaMemcpyDeviceToHost);
+    std::cout << "线程生命周期模拟完成，执行时间: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;
+    // 打印部分结果
+    std::cout << "线程索引和分支结果示例:" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "线程 " << i << " 的全局索引: " << hostGlobalIndex[i]
+                  << ", 分支结果: " << hostBranchResult[i] << std::endl;
+    }
+    // 启动核函数2: 分组操作
+    start = std::chrono::high_resolution_clock::now();
+    groupThreads<<<numBlocks, threadsPerBlock>>>(deviceGroupedData, totalThreads);
+    cudaDeviceSynchronize();
+    end = std::chrono::high_resolution_clock::now();
+    cudaMemcpy(hostGroupedData, deviceGroupedData, totalThreads * sizeof(int), cudaMemcpyDeviceToHost);
+    std::cout << "线程分组完成，执行时间: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;
+    // 打印部分分组结果
+    std::cout << "线程分组示例:" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "线程 " << i << " 所属分组: " << hostGroupedData[i] << std::endl;
+    }
+    // 清理内存
+    cudaFree(deviceGlobalIndex);
+    cudaFree(deviceBranchResult);
+    cudaFree(deviceGroupedData);
+    delete[] hostGlobalIndex;
+    delete[] hostBranchResult;
+    delete[] hostGroupedData;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 核函数：计算二维线程网格的索引并映射到矩阵元素
+__global__ void compute2DIndex(int *matrix, int width, int height) {
+    // 计算当前线程在二维网格中的全局索引
+    int row = threadIdx.y + blockIdx.y * blockDim.y;
+    int col = threadIdx.x + blockIdx.x * blockDim.x;
+    // 确保索引不越界
+    if (row < height && col < width) {
+        int index = row * width + col; // 将二维坐标映射为一维索引
+        matrix[index] = index;        // 将一维索引存入矩阵
+    }
+}
+// 打印二维矩阵
+void printMatrix(int *matrix, int width, int height) {
+    for (int i = 0; i < height; ++i) {
+        for (int j = 0; j < width; ++j) {
+            std::cout << matrix[i * width + j] << "\t";
+        }
+        std::cout << std::endl;
+    }
+}
+int main() {
+    // 矩阵维度
+    int width = 8;  // 矩阵的列数
+    int height = 8; // 矩阵的行数
+    // 分配主机内存
+    int *hostMatrix = new int[width * height];
+    // 分配设备内存
+    int *deviceMatrix;
+    cudaMalloc(&deviceMatrix, width * height * sizeof(int));
+    // 配置线程网格
+    dim3 blockDim(4, 4); // 每个线程块包含4x4个线程
+    dim3 gridDim((width + blockDim.x - 1) / blockDim.x,
+                 (height + blockDim.y - 1) / blockDim.y); // 网格维度计算
+    std::cout << "线程块维度: (" << blockDim.x << ", " << blockDim.y << ")" << std::endl;
+    std::cout << "网格维度: (" << gridDim.x << ", " << gridDim.y << ")" << std::endl;
+    // 启动核函数
+    compute2DIndex<<<gridDim, blockDim>>>(deviceMatrix, width, height);
+    cudaDeviceSynchronize();
+    // 拷贝结果回主机
+    cudaMemcpy(hostMatrix, deviceMatrix, width * height * sizeof(int), cudaMemcpyDeviceToHost);
+    // 打印结果
+    std::cout << "矩阵索引计算结果:" << std::endl;
+    printMatrix(hostMatrix, width, height);
+    // 释放内存
+    delete[] hostMatrix;
+    cudaFree(deviceMatrix);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 矩阵维度
+const int MATRIX_SIZE = 256; // 假设为方阵
+// 核函数：基于共享内存的矩阵乘法
+__global__ void matrixMultiplyShared(float *A, float *B, float *C, int N) {
+    // 共享内存分配
+    __shared__ float tileA[16][16];
+    __shared__ float tileB[16][16];
+    // 当前线程的行和列索引
+    int row = threadIdx.y + blockIdx.y * blockDim.y;
+    int col = threadIdx.x + blockIdx.x * blockDim.x;
+    float result = 0.0f; // 用于存储C[row][col]的值
+    // 分块加载A和B的子矩阵并进行计算
+    for (int tile = 0; tile < (N + 15) / 16; ++tile) {
+        // 加载A的子块到共享内存
+        if (row < N && tile * 16 + threadIdx.x < N) {
+            tileA[threadIdx.y][threadIdx.x] = A[row * N + tile * 16 + threadIdx.x];
+        } else {
+            tileA[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        // 加载B的子块到共享内存
+        if (tile * 16 + threadIdx.y < N && col < N) {
+            tileB[threadIdx.y][threadIdx.x] = B[(tile * 16 + threadIdx.y) * N + col];
+        } else {
+            tileB[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        __syncthreads(); // 确保所有线程加载完成
+        // 计算C[row][col]
+        for (int k = 0; k < 16; ++k) {
+            result += tileA[threadIdx.y][k] * tileB[k][threadIdx.x];
+        }
+        __syncthreads(); // 确保所有线程完成计算
+    }
+    // 将结果写入C矩阵
+    if (row < N && col < N) {
+        C[row * N + col] = result;
+    }
+}
+// 初始化矩阵
+void initializeMatrix(float *matrix, int size) {
+    for (int i = 0; i < size * size; ++i) {
+        matrix[i] = static_cast<float>(rand() % 10); // 随机数在0-9之间
+    }
+}
+// 打印矩阵
+void printMatrix(const float *matrix, int size) {
+    for (int i = 0; i < size; ++i) {
+        for (int j = 0; j < size; ++j) {
+            std::cout << matrix[i * size + j] << "\t";
+        }
+        std::cout << std::endl;
+    }
+}
+int main() {
+    int N = MATRIX_SIZE;
+    // 分配主机内存
+    float *hostA = new float[N * N];
+    float *hostB = new float[N * N];
+    float *hostC = new float[N * N];
+    // 初始化矩阵A和B
+    initializeMatrix(hostA, N);
+    initializeMatrix(hostB, N);
+    // 分配设备内存
+    float *deviceA, *deviceB, *deviceC;
+    cudaMalloc(&deviceA, N * N * sizeof(float));
+    cudaMalloc(&deviceB, N * N * sizeof(float));
+    cudaMalloc(&deviceC, N * N * sizeof(float));
+    // 拷贝数据到设备
+    cudaMemcpy(deviceA, hostA, N * N * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(deviceB, hostB, N * N * sizeof(float), cudaMemcpyHostToDevice);
+    // 配置线程网格
+    dim3 blockDim(16, 16); // 每个线程块16x16线程
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (N + blockDim.y - 1) / blockDim.y);
+    // 启动核函数
+    matrixMultiplyShared<<<gridDim, blockDim>>>(deviceA, deviceB, deviceC, N);
+    cudaDeviceSynchronize();
+    // 拷贝结果回主机
+    cudaMemcpy(hostC, deviceC, N * N * sizeof(float), cudaMemcpyDeviceToHost);
+    // 打印矩阵
+    std::cout << "矩阵A:" << std::endl;
+    printMatrix(hostA, N);
+    std::cout << "矩阵B:" << std::endl;
+    printMatrix(hostB, N);
+    std::cout << "矩阵C (结果):" << std::endl;
+    printMatrix(hostC, N);
+    // 释放内存
+    cudaFree(deviceA);
+    cudaFree(deviceB);
+    cudaFree(deviceC);
+    delete[] hostA;
+    delete[] hostB;
+    delete[] hostC;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <chrono>
+// 核函数：简单加法操作，模拟工作负载
+__global__ void computeKernel(int *data, int N) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x; // 计算线程的全局索引
+    if (idx < N) {
+        for (int i = 0; i < 1000; ++i) { // 模拟大量计算
+            data[idx] += i;
+        }
+    }
+}
+// 检查CUDA错误
+void checkCudaError(const char *msg) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << msg << " 错误: " << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+int main() {
+    // 配置参数
+    const int dataSize = 1 << 20; // 数据量 (1M元素)
+    int *hostData = new int[dataSize]; // 主机数据
+    int *deviceData;
+    // 初始化主机数据
+    for (int i = 0; i < dataSize; ++i) {
+        hostData[i] = 0;
+    }
+    // 分配设备内存
+    cudaMalloc(&deviceData, dataSize * sizeof(int));
+    checkCudaError("设备内存分配失败");
+    // 将数据从主机拷贝到设备
+    cudaMemcpy(deviceData, hostData, dataSize * sizeof(int), cudaMemcpyHostToDevice);
+    checkCudaError("主机到设备数据传输失败");
+    // 配置不同线程块大小
+    int blockSizes[] = {32, 64, 128, 256, 512};
+    const int numConfigs = sizeof(blockSizes) / sizeof(blockSizes[0]);
+    // 性能测试
+    for (int i = 0; i < numConfigs; ++i) {
+        int blockSize = blockSizes[i];
+        int numBlocks = (dataSize + blockSize - 1) / blockSize; // 计算网格大小
+        std::cout << "线程块大小: " << blockSize << ", 网格大小: " << numBlocks << std::endl;
+        // 记录时间
+        auto start = std::chrono::high_resolution_clock::now();
+        // 启动核函数
+        computeKernel<<<numBlocks, blockSize>>>(deviceData, dataSize);
+        cudaDeviceSynchronize();
+        checkCudaError("核函数执行失败");
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        // 输出性能结果
+        std::cout << "执行时间: " << duration << " ms" << std::endl;
+    }
+    // 将结果从设备拷贝回主机
+    cudaMemcpy(hostData, deviceData, dataSize * sizeof(int), cudaMemcpyDeviceToHost);
+    checkCudaError("设备到主机数据传输失败");
+    // 检查部分结果
+    std::cout << "结果验证:" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "hostData[" << i << "] = " << hostData[i] << std::endl;
+    }
+    // 释放内存
+    cudaFree(deviceData);
+    delete[] hostData;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <chrono>
+// 核函数：简单计算模拟寄存器和共享内存使用
+__global__ void computeKernel(int *output, int N) {
+    extern __shared__ int sharedMemory[]; // 动态分配的共享内存
+    int idx = threadIdx.x + blockIdx.x * blockDim.x; // 全局索引
+    if (idx < N) {
+        // 使用共享内存
+        sharedMemory[threadIdx.x] = idx % 10;
+        // 模拟寄存器计算
+        int localValue = sharedMemory[threadIdx.x];
+        for (int i = 0; i < 1000; ++i) {
+            localValue += i * threadIdx.x;
+        }
+        // 写入结果
+        output[idx] = localValue;
+    }
+}
+// 检查CUDA错误
+void checkCudaError(const char *msg) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << msg << " 错误: " << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+int main() {
+    const int dataSize = 1 << 20; // 数据量 (1M元素)
+    int *hostOutput = new int[dataSize]; // 主机结果数据
+    int *deviceOutput;
+    // 初始化主机数据
+    for (int i = 0; i < dataSize; ++i) {
+        hostOutput[i] = 0;
+    }
+    // 分配设备内存
+    cudaMalloc(&deviceOutput, dataSize * sizeof(int));
+    checkCudaError("设备内存分配失败");
+    // 配置线程块大小
+    int blockSizes[] = {32, 64, 128, 256, 512};
+    const int numConfigs = sizeof(blockSizes) / sizeof(blockSizes[0]);
+    // 测试不同线程块大小的性能
+    for (int i = 0; i < numConfigs; ++i) {
+        int blockSize = blockSizes[i];
+        int numBlocks = (dataSize + blockSize - 1) / blockSize;
+        std::cout << "线程块大小: " << blockSize << ", 网格大小: " << numBlocks << std::endl;
+        // 动态分配共享内存大小
+        int sharedMemorySize = blockSize * sizeof(int);
+        auto start = std::chrono::high_resolution_clock::now();
+        // 启动核函数
+        computeKernel<<<numBlocks, blockSize, sharedMemorySize>>>(deviceOutput, dataSize);
+        cudaDeviceSynchronize();
+        checkCudaError("核函数执行失败");
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        // 输出性能结果
+        std::cout << "共享内存大小: " << sharedMemorySize << " 字节, 执行时间: " << duration << " ms" << std::endl;
+    }
+    // 将结果从设备拷贝回主机
+    cudaMemcpy(hostOutput, deviceOutput, dataSize * sizeof(int), cudaMemcpyDeviceToHost);
+    checkCudaError("设备到主机数据传输失败");
+    // 验证结果
+    std::cout << "部分结果验证:" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "hostOutput[" << i << "] = " << hostOutput[i] << std::endl;
+    }
+    // 释放内存
+    cudaFree(deviceOutput);
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 动态并行核函数：递归计算数组元素平方和
+__global__ void recursiveSum(int *data, int size, int *result) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (size <= 1) {
+        // 基本情况：数组只有一个元素
+        if (idx == 0) {
+            *result = data[0]; // 返回最终结果
+        }
+        return;
+    }
+    if (idx < size / 2) {
+        // 每个线程计算两个元素的平方和
+        data[idx] += data[idx + size / 2];
+    }
+    __syncthreads(); // 确保所有线程完成操作
+    if (threadIdx.x == 0) {
+        // 递归调用新网格
+        int newSize = size / 2;
+        recursiveSum<<<1, newSize>>>(data, newSize, result);
+        cudaDeviceSynchronize();
+    }
+}
+void checkCudaError(const char *msg) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << msg << " 错误: " << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+int main() {
+    const int dataSize = 16; // 数组大小
+    int hostData[dataSize]; // 主机数据
+    int hostResult;         // 最终结果
+    // 初始化数组
+    for (int i = 0; i < dataSize; ++i) {
+        hostData[i] = i + 1; // 数据为1, 2, ..., 16
+    }
+    // 分配设备内存
+    int *deviceData, *deviceResult;
+    cudaMalloc(&deviceData, dataSize * sizeof(int));
+    cudaMalloc(&deviceResult, sizeof(int));
+    checkCudaError("设备内存分配失败");
+    // 拷贝数据到设备
+    cudaMemcpy(deviceData, hostData, dataSize * sizeof(int), cudaMemcpyHostToDevice);
+    checkCudaError("主机到设备数据传输失败");
+    // 启动核函数
+    recursiveSum<<<1, dataSize>>>(deviceData, dataSize, deviceResult);
+    cudaDeviceSynchronize();
+    checkCudaError("核函数执行失败");
+    // 拷贝结果回主机
+    cudaMemcpy(&hostResult, deviceResult, sizeof(int), cudaMemcpyDeviceToHost);
+    checkCudaError("设备到主机数据传输失败");
+    // 输出结果
+    std::cout << "递归计算数组平方和结果: " << hostResult << std::endl;
+    // 释放内存
+    cudaFree(deviceData);
+    cudaFree(deviceResult);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 动态并行核函数：递归计算二维矩阵每行的平方和
+__global__ void recursiveRowSum(int *matrix, int rows, int cols, int *result) {
+    int rowIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    // 如果当前线程超出行范围，直接返回
+    if (rowIdx >= rows) return;
+    // 初始化当前行的平方和
+    int sum = 0;
+    for (int col = 0; col < cols; ++col) {
+        int idx = rowIdx * cols + col; // 计算矩阵元素的线性索引
+        sum += matrix[idx] * matrix[idx];
+    }
+    // 将结果写入中间数组
+    result[rowIdx] = sum;
+    // 如果是第一层递归，启动动态网格进行下一步递归
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        int newCols = cols / 2; // 每层递归减少列数
+        if (newCols > 0) {
+            recursiveRowSum<<<1, rows>>>(matrix, rows, newCols, result);
+            cudaDeviceSynchronize();
+        }
+    }
+}
+void checkCudaError(const char *msg) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << msg << " 错误: " << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+int main() {
+    const int rows = 4, cols = 8; // 矩阵大小
+    int hostMatrix[rows][cols] = { // 初始化二维矩阵
+        {1, 2, 3, 4, 5, 6, 7, 8},
+        {2, 4, 6, 8, 10, 12, 14, 16},
+        {3, 6, 9, 12, 15, 18, 21, 24},
+        {4, 8, 12, 16, 20, 24, 28, 32}
+    };
+    int hostResult[rows]; // 存储最终结果
+    // 分配设备内存
+    int *deviceMatrix, *deviceResult;
+    cudaMalloc(&deviceMatrix, rows * cols * sizeof(int));
+    cudaMalloc(&deviceResult, rows * sizeof(int));
+    checkCudaError("设备内存分配失败");
+    // 拷贝矩阵到设备
+    cudaMemcpy(deviceMatrix, hostMatrix, rows * cols * sizeof(int), cudaMemcpyHostToDevice);
+    checkCudaError("主机到设备数据传输失败");
+    // 启动核函数
+    recursiveRowSum<<<1, rows>>>(deviceMatrix, rows, cols, deviceResult);
+    cudaDeviceSynchronize();
+    checkCudaError("核函数执行失败");
+    // 拷贝结果回主机
+    cudaMemcpy(hostResult, deviceResult, rows * sizeof(int), cudaMemcpyDeviceToHost);
+    checkCudaError("设备到主机数据传输失败");
+    // 输出结果
+    std::cout << "每行的平方和结果:" << std::endl;
+    for (int i = 0; i < rows; ++i) {
+        std::cout << "第 " << i + 1 << " 行: " << hostResult[i] << std::endl;
+    }
+    // 释放内存
+    cudaFree(deviceMatrix);
+    cudaFree(deviceResult);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <chrono>
+// 核函数：存在分支发散
+__global__ void branchDivergence(int *data, int N) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < N) {
+        if (idx % 2 == 0) {
+            data[idx] *= 2; // 偶数元素乘以2
+        } else {
+            data[idx] += 1; // 奇数元素加1
+        }
+    }
+}
+// 核函数：通过分支规约优化
+__global__ void branchReduction(int *data, int N) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < N) {
+        int value = data[idx];
+        data[idx] = (idx % 2 == 0) ? value * 2 : value + 1; // 使用规约合并分支
+    }
+}
+// 检查CUDA错误
+void checkCudaError(const char *msg) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << msg << " 错误: " << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+int main() {
+    const int dataSize = 1 << 20; // 数据量 (1M元素)
+    int *hostData = new int[dataSize];
+    int *deviceData;
+    // 初始化主机数据
+    for (int i = 0; i < dataSize; ++i) {
+        hostData[i] = i;
+    }
+    // 分配设备内存
+    cudaMalloc(&deviceData, dataSize * sizeof(int));
+    checkCudaError("设备内存分配失败");
+    // 将数据从主机拷贝到设备
+    cudaMemcpy(deviceData, hostData, dataSize * sizeof(int), cudaMemcpyHostToDevice);
+    checkCudaError("主机到设备数据传输失败");
+    // 测试分支发散
+    dim3 blockDim(256);
+    dim3 gridDim((dataSize + blockDim.x - 1) / blockDim.x);
+    auto start = std::chrono::high_resolution_clock::now();
+    branchDivergence<<<gridDim, blockDim>>>(deviceData, dataSize);
+    cudaDeviceSynchronize();
+    checkCudaError("分支发散核函数执行失败");
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "分支发散核函数执行时间: " << duration << " ms" << std::endl;
+    // 测试分支规约
+    cudaMemcpy(deviceData, hostData, dataSize * sizeof(int), cudaMemcpyHostToDevice);
+    checkCudaError("主机到设备数据传输失败");
+    start = std::chrono::high_resolution_clock::now();
+    branchReduction<<<gridDim, blockDim>>>(deviceData, dataSize);
+    cudaDeviceSynchronize();
+    checkCudaError("分支规约核函数执行失败");
+    end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "分支规约核函数执行时间: " << duration << " ms" << std::endl;
+    // 将结果从设备拷贝回主机
+    cudaMemcpy(hostData, deviceData, dataSize * sizeof(int), cudaMemcpyDeviceToHost);
+    checkCudaError("设备到主机数据传输失败");
+    // 输出部分结果
+    std::cout << "结果验证:" << std::endl;
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "hostData[" << i << "] = " << hostData[i] << std::endl;
+    }
+    // 释放内存
+    cudaFree(deviceData);
+    delete[] hostData;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <chrono>
+// 核函数：使用Warp Shuffle实现Warp内归约求和
+__global__ void warpReduceSum(int *input, int *output, int N) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int lane = threadIdx.x % warpSize; // 线程在Warp内的索引
+    int warpId = threadIdx.x / warpSize; // 当前线程所属的Warp编号
+    // 初始化归约值
+    int value = (idx < N) ? input[idx] : 0;
+    // 使用Warp Shuffle实现归约
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        value += __shfl_down_sync(0xffffffff, value, offset);
+    }
+    // 将每个Warp的结果写入共享内存
+    if (lane == 0) {
+        atomicAdd(output, value); // 原子操作，避免冲突
+    }
+}
+void checkCudaError(const char *msg) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << msg << " 错误: " << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+int main() {
+    const int dataSize = 1 << 20; // 数据量 (1M元素)
+    int *hostInput = new int[dataSize];
+    int hostOutput = 0;
+    // 初始化输入数据
+    for (int i = 0; i < dataSize; ++i) {
+        hostInput[i] = 1; // 每个元素初始化为1
+    }
+    // 分配设备内存
+    int *deviceInput, *deviceOutput;
+    cudaMalloc(&deviceInput, dataSize * sizeof(int));
+    cudaMalloc(&deviceOutput, sizeof(int));
+    checkCudaError("设备内存分配失败");
+    // 拷贝数据到设备
+    cudaMemcpy(deviceInput, hostInput, dataSize * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemset(deviceOutput, 0, sizeof(int)); // 初始化输出为0
+    checkCudaError("主机到设备数据传输失败");
+    // 配置线程块和网格
+    dim3 blockDim(256);
+    dim3 gridDim((dataSize + blockDim.x - 1) / blockDim.x);
+    // 启动核函数
+    auto start = std::chrono::high_resolution_clock::now();
+    warpReduceSum<<<gridDim, blockDim>>>(deviceInput, deviceOutput, dataSize);
+    cudaDeviceSynchronize();
+    checkCudaError("核函数执行失败");
+    auto end = std::chrono::high_resolution_clock::now();
+    // 拷贝结果回主机
+    cudaMemcpy(&hostOutput, deviceOutput, sizeof(int), cudaMemcpyDeviceToHost);
+    checkCudaError("设备到主机数据传输失败");
+    // 输出结果
+    std::cout << "数组总和: " << hostOutput << std::endl;
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "执行时间: " << duration << " ms" << std::endl;
+    // 释放内存
+    cudaFree(deviceInput);
+    cudaFree(deviceOutput);
+    delete[] hostInput;
+    return 0;
+}
+

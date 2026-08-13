@@ -1,0 +1,595 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+// 非优化代码
+if (threadIdx.x % 2 == 0) {
+    data[threadIdx.x] = threadIdx.x * 2;
+} else {
+    data[threadIdx.x] = threadIdx.x * 3;
+}
+// 优化代码
+data[threadIdx.x] = threadIdx.x * (2 + (threadIdx.x % 2));
+// 非优化代码
+float temp1 = a + b;
+float temp2 = temp1 * c;
+// 优化代码
+float temp = (a + b) * c;
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+nvcc --version
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\vXX.X\bin
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\vXX.X\libnvvp
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+source ~/.bashrc
+nvidia-smi
+sudo apt install gcc g++
+gcc --version
+make
+./deviceQuery
+nvcc -o main main.cu
+./main
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 检查CUDA错误宏
+#define CUDA_CHECK(call)                                                       \
+    {                                                                          \
+        const cudaError_t error = call;                                        \
+        if (error != cudaSuccess)                                              \
+        {                                                                      \
+            std::cerr << "Error: " << __FILE__ << ":" << __LINE__ << ", "      \
+                      << cudaGetErrorString(error) << std::endl;               \
+            exit(1);                                                           \
+        }                                                                      \
+    }
+// 核函数模拟Warp分组与分支发散
+__global__ void warpExecutionSimulation(int *data, int n)
+{
+    // 当前线程的索引
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    // 模拟Warp的分支行为
+    if (idx < n)
+    {
+        if (idx % 2 == 0)
+        {
+            data[idx] = idx * 2; // 偶数线程
+        }
+        else
+        {
+            data[idx] = idx * 3; // 奇数线程
+        }
+    }
+}
+// 核函数演示寄存器溢出和局部内存行为
+__global__ void registerAllocationTest(int *data, int n)
+{
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n)
+    {
+        // 模拟寄存器高占用导致的溢出
+        int temp1 = idx + 1;
+        int temp2 = temp1 * 2;
+        int temp3 = temp2 + idx;
+        // 使用计算结果更新数据
+        data[idx] = temp3;
+    }
+}
+// 结果打印函数
+void printResults(const int *data, int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        std::cout << "Index " << i << ": Value " << data[i] << std::endl;
+    }
+}
+// 主函数
+int main()
+{
+    // 数据大小
+    const int n = 32;
+    const int size = n * sizeof(int);
+    // 主机和设备内存
+    int *h_data = (int *)malloc(size);
+    int *d_data;
+    // 分配设备内存
+    CUDA_CHECK(cudaMalloc((void **)&d_data, size));
+    // 初始化主机数据
+    for (int i = 0; i < n; i++)
+    {
+        h_data[i] = 0;
+    }
+    // 传输数据到设备
+    CUDA_CHECK(cudaMemcpy(d_data, h_data, size, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    dim3 blockSize(32);
+    dim3 gridSize((n + blockSize.x - 1) / blockSize.x);
+    // 执行核函数
+    std::cout << "运行Warp分支模拟核函数..." << std::endl;
+    warpExecutionSimulation<<<gridSize, blockSize>>>(d_data, n);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 传输结果回主机
+    CUDA_CHECK(cudaMemcpy(h_data, d_data, size, cudaMemcpyDeviceToHost));
+    // 打印Warp分支模拟结果
+    std::cout << "Warp分支模拟结果:" << std::endl;
+    printResults(h_data, n);
+    // 再次初始化数据
+    for (int i = 0; i < n; i++)
+    {
+        h_data[i] = 0;
+    }
+    CUDA_CHECK(cudaMemcpy(d_data, h_data, size, cudaMemcpyHostToDevice));
+    // 执行寄存器溢出测试核函数
+    std::cout << "运行寄存器分配测试核函数..." << std::endl;
+    registerAllocationTest<<<gridSize, blockSize>>>(d_data, n);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 传输结果回主机
+    CUDA_CHECK(cudaMemcpy(h_data, d_data, size, cudaMemcpyDeviceToHost));
+    // 打印寄存器分配测试结果
+    std::cout << "寄存器分配测试结果:" << std::endl;
+    printResults(h_data, n);
+    // 清理内存
+    free(h_data);
+    CUDA_CHECK(cudaFree(d_data));
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+nvcc -arch=sm_75 program.cu -o program
+nvcc program.cu -ptx -o program.ptx
+nvcc program.cu -maxrregcount=32 -o program
+nvcc program.cu -G -o program
+nvcc program.cu -arch=compute_75 -code=sm_75,compute_75 -o program
+nvcc program.cu -Xptxas=-v -o program
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <iostream>
+#include <cuda_runtime.h>
+__global__ void addKernel(int *c, const int *a, const int *b, int size) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < size) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+int main() {
+    const int size = 1024;
+    int h_a[size], h_b[size], h_c[size];
+    int *d_a, *d_b, *d_c;
+    for (int i = 0; i < size; ++i) {
+        h_a[i] = i;
+        h_b[i] = i * 2;
+    }
+    cudaMalloc(&d_a, size * sizeof(int));
+    cudaMalloc(&d_b, size * sizeof(int));
+    cudaMalloc(&d_c, size * sizeof(int));
+    cudaMemcpy(d_a, h_a, size * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, size * sizeof(int), cudaMemcpyHostToDevice);
+    addKernel<<<size / 256, 256>>>(d_c, d_a, d_b, size);
+    cudaMemcpy(h_c, d_c, size * sizeof(int), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < 10; ++i) {
+        std::cout << h_c[i] << std::endl;
+    }
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+__global__ void addKernel(int *c, const int *a, const int *b, int size) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < size) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+
+#include <cuda.h>
+CUmodule cuModule;
+CUfunction cuFunction;
+cuModuleLoad(&cuModule, "add.ptx");
+cuModuleGetFunction(&cuFunction, cuModule, "addKernel");
+void *args[] = {&c, &a, &b, &size};
+cuLaunchKernel(cuFunction, gridSize, 1, 1, blockSize, 1, 1, 0, 0, args, 0);
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+nvidia-smi
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+nvcc -arch=sm_75 -code=sm_75,compute_75 program.cu
+nvidia-smi
+nvcc --version
+NVIDIA-SMI 470.57.02
+Driver Version: 470.57.02
+CUDA Version: 11.4
+nvcc -arch=sm_70 program.cu -o program
+./program
+export PATH=/usr/local/cuda-11.4/bin:$PATH
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <cuda.h>
+#include <iostream>
+// 检查CUDA错误宏
+#define CUDA_CHECK(call)                                                       \
+    {                                                                          \
+        const cudaError_t error = call;                                        \
+        if (error != cudaSuccess)                                              \
+        {                                                                      \
+            std::cerr << "Error: " << __FILE__ << ":" << __LINE__ << ", "      \
+                      << cudaGetErrorString(error) << std::endl;               \
+            exit(1);                                                           \
+        }                                                                      \
+    }
+#define DRIVER_CHECK(call)                                                     \
+    {                                                                          \
+        CUresult result = call;                                                \
+        if (result != CUDA_SUCCESS)                                            \
+        {                                                                      \
+            std::cerr << "Driver API error at " << __FILE__ << ":"             \
+                      << __LINE__ << std::endl;                                \
+            exit(1);                                                           \
+        }                                                                      \
+    }
+// 核函数：运行时API
+__global__ void addKernel(int *c, const int *a, const int *b, int size)
+{
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < size)
+    {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+// 核函数代码字符串：驱动API
+const char *ptx_code = R"(
+.version 6.4
+.target sm_75
+.address_size 64
+.visible .entry addKernel(
+    .param .u64 param0,
+    .param .u64 param1,
+    .param .u64 param2,
+    .param .u32 param3
+)
+{
+    .reg .pred %p<2>;
+    .reg .s32 %r<5>;
+    .reg .s64 %rd<6>;
+    ld.param.u64 %rd1, [param0];
+    ld.param.u64 %rd2, [param1];
+    ld.param.u64 %rd3, [param2];
+    ld.param.u32 %r1, [param3];
+    cvta.to.global.u64 %rd4, %rd1;
+    cvta.to.global.u64 %rd5, %rd2;
+    cvta.to.global.u64 %rd6, %rd3;
+    mov.u32 %r2, %tid.x;
+    add.s32 %r3, %r2, %ctaid.x;
+    setp.ge.s32 %p1, %r3, %r1;
+    @%p1 bra end;
+    shl.b32 %r4, %r3, 2;
+    add.s64 %rd1, %rd4, %r4;
+    add.s64 %rd2, %rd5, %r4;
+    add.s64 %rd3, %rd6, %r4;
+    ld.global.s32 %r2, [%rd2];
+    ld.global.s32 %r3, [%rd3];
+    add.s32 %r4, %r2, %r3;
+    st.global.s32 [%rd1], %r4;
+end:
+    ret;
+}
+)";
+int main()
+{
+    const int size = 1024;
+    const int bytes = size * sizeof(int);
+    // 主机内存
+    int *h_a = new int[size];
+    int *h_b = new int[size];
+    int *h_c = new int[size];
+    for (int i = 0; i < size; ++i)
+    {
+        h_a[i] = i;
+        h_b[i] = i * 2;
+    }
+    // 运行时API实现
+    int *d_a, *d_b, *d_c;
+    CUDA_CHECK(cudaMalloc((void **)&d_a, bytes));
+    CUDA_CHECK(cudaMalloc((void **)&d_b, bytes));
+    CUDA_CHECK(cudaMalloc((void **)&d_c, bytes));
+    CUDA_CHECK(cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice));
+    dim3 threadsPerBlock(256);
+    dim3 blocksPerGrid((size + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    addKernel<<<blocksPerGrid, threadsPerBlock>>>(d_c, d_a, d_b, size);
+    CUDA_CHECK(cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost));
+    std::cout << "运行时API结果:" << std::endl;
+    for (int i = 0; i < 10; ++i)
+    {
+        std::cout << h_c[i] << " ";
+    }
+    std::cout << std::endl;
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    // 驱动API实现
+    CUdevice cuDevice;
+    CUcontext cuContext;
+    CUmodule cuModule;
+    CUfunction cuFunction;
+    DRIVER_CHECK(cuInit(0));
+    DRIVER_CHECK(cuDeviceGet(&cuDevice, 0));
+    DRIVER_CHECK(cuCtxCreate(&cuContext, 0, cuDevice));
+    DRIVER_CHECK(cuModuleLoadDataEx(&cuModule, ptx_code, 0, nullptr, nullptr));
+    DRIVER_CHECK(cuModuleGetFunction(&cuFunction, cuModule, "addKernel"));
+    DRIVER_CHECK(cuMemAlloc((CUdeviceptr *)&d_a, bytes));
+    DRIVER_CHECK(cuMemAlloc((CUdeviceptr *)&d_b, bytes));
+    DRIVER_CHECK(cuMemAlloc((CUdeviceptr *)&d_c, bytes));
+    DRIVER_CHECK(cuMemcpyHtoD((CUdeviceptr)d_a, h_a, bytes));
+    DRIVER_CHECK(cuMemcpyHtoD((CUdeviceptr)d_b, h_b, bytes));
+    void *args[] = {&d_c, &d_a, &d_b, &size};
+    DRIVER_CHECK(cuLaunchKernel(cuFunction, blocksPerGrid.x, 1, 1,
+                                threadsPerBlock.x, 1, 1, 0, 0, args, 0));
+    DRIVER_CHECK(cuMemcpyDtoH(h_c, (CUdeviceptr)d_c, bytes));
+    std::cout << "驱动API结果:" << std::endl;
+    for (int i = 0; i < 10; ++i)
+    {
+        std::cout << h_c[i] << " ";
+    }
+    std::cout << std::endl;
+    cuMemFree((CUdeviceptr)d_a);
+    cuMemFree((CUdeviceptr)d_b);
+    cuMemFree((CUdeviceptr)d_c);
+    cuCtxDestroy(cuContext);
+    delete[] h_a;
+    delete[] h_b;
+    delete[] h_c;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 1
+sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 1
+nvidia-smi -pm 1
+nvidia-smi -pl <功耗限制值>
+nsys profile ./program
+sudo nvidia-smi --applications-clocks=<显存频率>,<核心频率>
+export CUDA_VISIBLE_DEVICES=0,1
+cmake -G "Visual Studio 16 2019" -DCMAKE_CUDA_COMPILER=nvcc
+nvcc -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.29.30133\bin\Hostx64\x64"
+sudo apt-get --purge remove nvidia-*
+sudo apt-get install nvidia-driver-<版本号>
+
+
+sudo apt update
+sudo apt install docker.io
+sudo systemctl start docker
+sudo systemctl enable docker
+
+
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+sudo apt update
+sudo apt install -y nvidia-container-toolkit
+sudo systemctl restart docker
+docker run --rm --gpus all nvidia/cuda:11.4.2-base-ubuntu20.04 nvidia-smi
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+docker run --rm -it --gpus all nvidia/cuda:11.4.2-devel-ubuntu20.04 /bin/bash
+FROM nvidia/cuda:11.4.2-devel-ubuntu20.04
+RUN apt update && apt install -y build-essential
+docker build -t my-cuda-env .
+docker run --rm -it --gpus all my-cuda-env /bin/bash
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+import subprocess
+import time
+def run_command(command):
+    """
+    运行系统命令，并返回结果
+    """
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            print(f"命令执行错误: {result.stderr}")
+            return None
+        return result.stdout.strip()
+    except Exception as e:
+        print(f"运行命令失败: {e}")
+        return None
+def query_gpu_status():
+    """
+    查询 GPU 的实时状态信息
+    """
+    print("查询 GPU 状态中...")
+    command = ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,temperature.gpu,power.draw,power.limit", "--format=csv,noheader,nounits"]
+    output = run_command(command)
+    if output:
+        print("当前 GPU 状态:")
+        for line in output.splitlines():
+            index, name, utilization, temp, power_draw, power_limit = line.split(", ")
+            print(f"GPU {index}:")
+            print(f"  名称: {name}")
+            print(f"  利用率: {utilization}%")
+            print(f"  温度: {temp}°C")
+            print(f"  当前功耗: {power_draw} W")
+            print(f"  功耗限制: {power_limit} W")
+            print("-" * 30)
+def set_power_limit(gpu_index, power_limit):
+    """
+    设置 GPU 的功耗限制
+    """
+    print(f"设置 GPU {gpu_index} 的功耗限制为 {power_limit} W...")
+    command = ["nvidia-smi", "-i", str(gpu_index), "-pl", str(power_limit)]
+    output = run_command(command)
+    if output:
+        print(f"功耗限制设置成功: {output}")
+    else:
+        print("设置功耗限制失败")
+def monitor_and_optimize(gpu_index, max_temp=75):
+    """
+    动态监控 GPU 温度并调整功耗限制
+    """
+    print(f"开始动态监控 GPU {gpu_index} 的温度和功耗...")
+    while True:
+        # 查询温度
+        command = ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits", "-i", str(gpu_index)]
+        temp = run_command(command)
+        if temp is None:
+            print("无法获取 GPU 温度")
+            break
+        temp = int(temp)
+        print(f"当前 GPU {gpu_index} 温度: {temp}°C")
+        # 根据温度调整功耗限制
+        if temp > max_temp:
+            print(f"温度过高 ({temp}°C)，降低功耗限制...")
+            set_power_limit(gpu_index, 100)  # 设置较低功耗限制
+        else:
+            print(f"温度正常 ({temp}°C)，恢复默认功耗限制...")
+            set_power_limit(gpu_index, 250)  # 恢复默认功耗限制
+        time.sleep(5)  # 每 5 秒监控一次
+if __name__ == "__main__":
+    print("==== GPU 状态查询与优化工具 ====")
+    query_gpu_status()
+    # 设置功耗限制示例
+    gpu_index = 0  # 假设目标 GPU 为索引 0
+    set_power_limit(gpu_index, 200)
+    # 开始动态监控和优化
+    monitor_and_optimize(gpu_index)
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+import subprocess
+import time
+import datetime
+def run_command(command):
+    """
+    运行系统命令，并返回结果
+    """
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            print(f"命令执行错误:{result.stderr}")
+            return None
+        return result.stdout.strip()
+    except Exception as e:
+        print(f"运行命令失败:{e}")
+        return None
+def log_to_file(log_message, file_path="gpu_status.log"):
+    """
+    将日志消息写入文件
+    """
+    with open(file_path, "a") as log_file:
+        log_file.write(f"{datetime.datetime.now()} - {log_message}\n")
+def query_all_gpus():
+    """
+    查询所有GPU的实时状态信息
+    """
+    print("查询所有GPU状态中...")
+    command = ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,temperature.gpu,power.draw,power.limit", "--format=csv,noheader,nounits"]
+    output = run_command(command)
+    if output:
+        gpu_info_list = []
+        for line in output.splitlines():
+            index, name, utilization, temp, power_draw, power_limit = line.split(", ")
+            gpu_info = {
+                "index": int(index),
+                "name": name,
+                "utilization": int(utilization),
+                "temperature": int(temp),
+                "power_draw": float(power_draw),
+                "power_limit": float(power_limit)
+            }
+            gpu_info_list.append(gpu_info)
+            print(f"GPU{gpu_info['index']}状态:")
+            print(f"  名称:{gpu_info['name']}")
+            print(f"  利用率:{gpu_info['utilization']}%")
+            print(f"  温度:{gpu_info['temperature']}°C")
+            print(f"  当前功耗:{gpu_info['power_draw']}W")
+            print(f"  功耗限制:{gpu_info['power_limit']}W")
+            print("-" * 30)
+            log_to_file(f"GPU{gpu_info['index']} 状态: {gpu_info}")
+        return gpu_info_list
+    else:
+        print("无法获取GPU状态")
+        return []
+def set_gpu_power_limit(gpu_index, power_limit):
+    """
+    设置指定GPU的功耗限制
+    """
+    print(f"设置GPU{gpu_index}的功耗限制为{power_limit}W...")
+    command = ["nvidia-smi", "-i", str(gpu_index), "-pl", str(power_limit)]
+    output = run_command(command)
+    if output:
+        print(f"GPU{gpu_index}功耗限制设置成功:{output}")
+        log_to_file(f"GPU{gpu_index}功耗限制设置为{power_limit}W")
+    else:
+        print(f"GPU{gpu_index}功耗限制设置失败")
+        log_to_file(f"GPU{gpu_index}功耗限制设置失败")
+def monitor_and_adjust(gpus, max_temp=75):
+    """
+    动态监控所有GPU的温度并调整功耗限制
+    """
+    print("开始动态监控所有GPU的温度和功耗...")
+    while True:
+        for gpu in gpus:
+            gpu_index = gpu["index"]
+            command = ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits", "-i", str(gpu_index)]
+            temp = run_command(command)
+            if temp is None:
+                print(f"无法获取GPU{gpu_index}的温度")
+                continue
+            temp = int(temp)
+            print(f"当前GPU{gpu_index}温度:{temp}°C")
+            if temp > max_temp:
+                print(f"GPU{gpu_index}温度过高({temp}°C)，降低功耗限制...")
+                set_gpu_power_limit(gpu_index, 100)
+            else:
+                print(f"GPU{gpu_index}温度正常({temp}°C)，恢复默认功耗限制...")
+                set_gpu_power_limit(gpu_index, 250)
+        time.sleep(10)  # 每10秒监控一次
+if __name__ == "__main__":
+    print("====GPU状态监控与批量管理工具====")
+    # 查询所有GPU状态
+    gpus = query_all_gpus()
+    # 设置所有GPU功耗限制为200W
+    print("批量设置所有GPU功耗限制为200W...")
+    for gpu in gpus:
+        set_gpu_power_limit(gpu["index"], 200)
+    # 开始动态监控和调整
+    monitor_and_adjust(gpus)
+

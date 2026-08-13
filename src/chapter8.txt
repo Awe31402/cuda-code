@@ -1,0 +1,639 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define CUDA_CHECK(call)                                                                 \
+    {                                                                                    \
+        cudaError_t err = call;                                                          \
+        if (err != cudaSuccess) {                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "         \
+                      << cudaGetErrorString(err) << std::endl;                           \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                                \
+    }
+// 核函数：使用原子加实现数组求和
+__global__ void atomicAddExample(const int *input, int *result, int N) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    if (tid < N) {
+        atomicAdd(result, input[tid]);
+    }
+}
+int main() {
+    const int N = 1024; // 数组大小
+    const size_t bytes = N * sizeof(int);
+    // 主机内存分配
+    int *hostInput = new int[N];
+    int hostResult = 0;
+    // 初始化输入数据
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = 1; // 每个元素初始化为1
+    }
+    // 打印输入数据
+    std::cout << "Input Array:" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        std::cout << hostInput[i] << " ";
+    }
+    std::cout << std::endl;
+    // 设备内存分配
+    int *deviceInput, *deviceResult;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceResult, sizeof(int)));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(deviceResult, 0, sizeof(int)));
+    // 配置线程块和网格
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+    // 执行核函数
+    atomicAddExample<<<blocksPerGrid, threadsPerBlock>>>(deviceInput, deviceResult, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 结果传回主机
+    CUDA_CHECK(cudaMemcpy(&hostResult, deviceResult, sizeof(int), cudaMemcpyDeviceToHost));
+    // 打印结果
+    std::cout << "Result of atomicAdd: " << hostResult << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceResult));
+    delete[] hostInput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define CUDA_CHECK(call)                                                                 \
+    {                                                                                    \
+        cudaError_t err = call;                                                          \
+        if (err != cudaSuccess) {                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "         \
+                      << cudaGetErrorString(err) << std::endl;                           \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                                \
+    }
+// 核函数：使用原子加实现并行直方图
+__global__ void histogramKernel(const int *data, int *histogram, int dataSize, int binCount) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    if (tid < dataSize) {
+        int bin = data[tid] % binCount; // 根据数据值计算对应的直方图桶
+        atomicAdd(&histogram[bin], 1); // 使用原子加更新直方图桶
+    }
+}
+int main() {
+    const int dataSize = 1024; // 数据大小
+    const int binCount = 10;  // 直方图桶数
+    const size_t dataBytes = dataSize * sizeof(int);
+    const size_t histBytes = binCount * sizeof(int);
+    // 主机内存分配
+    int *hostData = new int[dataSize];
+    int *hostHistogram = new int[binCount]();
+    // 初始化输入数据
+    for (int i = 0; i < dataSize; ++i) {
+        hostData[i] = rand() % 100; // 数据值范围为0-99
+    }
+    // 打印输入数据（部分展示）
+    std::cout << "Input Data (Partial):" << std::endl;
+    for (int i = 0; i < 20; ++i) {
+        std::cout << hostData[i] << " ";
+    }
+    std::cout << "... (Total: " << dataSize << " elements)" << std::endl;
+    // 设备内存分配
+    int *deviceData, *deviceHistogram;
+    CUDA_CHECK(cudaMalloc(&deviceData, dataBytes));
+    CUDA_CHECK(cudaMalloc(&deviceHistogram, histBytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceData, hostData, dataBytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(deviceHistogram, 0, histBytes));
+    // 配置线程块和网格
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (dataSize + threadsPerBlock - 1) / threadsPerBlock;
+    // 执行核函数
+    histogramKernel<<<blocksPerGrid, threadsPerBlock>>>(deviceData, deviceHistogram, dataSize, binCount);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 将直方图结果传回主机
+    CUDA_CHECK(cudaMemcpy(hostHistogram, deviceHistogram, histBytes, cudaMemcpyDeviceToHost));
+    // 打印直方图结果
+    std::cout << "Histogram Result:" << std::endl;
+    for (int i = 0; i < binCount; ++i) {
+        std::cout << "Bin " << i << ": " << hostHistogram[i] << std::endl;
+    }
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceData));
+    CUDA_CHECK(cudaFree(deviceHistogram));
+    delete[] hostData;
+    delete[] hostHistogram;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define CUDA_CHECK(call)                                                                 \
+    {                                                                                    \
+        cudaError_t err = call;                                                          \
+        if (err != cudaSuccess) {                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "         \
+                      << cudaGetErrorString(err) << std::endl;                           \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                                \
+    }
+// 核函数：使用Warp Shuffle实现归约求和
+__inline__ __device__ int warpReduceSum(int val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset); // 利用Shuffle指令实现Warp内数据交换
+    }
+    return val;
+}
+__global__ void warpReduceSumKernel(const int *input, int *output, int N) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int lane = threadIdx.x % 32; // Warp内线程索引
+    int warpID = threadIdx.x / 32; // Warp ID
+    __shared__ int sharedSum[32]; // 每个Warp的归约结果存储
+    // 每个线程加载一个数据
+    int value = (tid < N) ? input[tid] : 0;
+    // 使用Warp Shuffle进行归约
+    int warpSum = warpReduceSum(value);
+    // Warp内的线程0将结果存入共享内存
+    if (lane == 0) {
+        sharedSum[warpID] = warpSum;
+    }
+    __syncthreads(); // 确保共享内存中所有Warp结果都已写入
+    // 线程块内线程0归约所有Warp的结果
+    if (threadIdx.x == 0) {
+        int blockSum = 0;
+        for (int i = 0; i < (blockDim.x + 31) / 32; ++i) {
+            blockSum += sharedSum[i];
+        }
+        atomicAdd(output, blockSum); // 全局累加
+    }
+}
+int main() {
+    const int N = 1024; // 输入数组大小
+    const size_t bytes = N * sizeof(int);
+    // 主机内存分配
+    int *hostInput = new int[N];
+    int hostOutput = 0;
+    // 初始化输入数据
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = 1; // 每个元素初始化为1
+    }
+    // 设备内存分配
+    int *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, sizeof(int)));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(deviceOutput, 0, sizeof(int)));
+    // 配置线程块和网格
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+    // 执行核函数
+    warpReduceSumKernel<<<blocksPerGrid, threadsPerBlock>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 将结果传回主机
+    CUDA_CHECK(cudaMemcpy(&hostOutput, deviceOutput, sizeof(int), cudaMemcpyDeviceToHost));
+    // 打印结果
+    std::cout << "Result of Warp Reduce Sum: " << hostOutput << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostInput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define CUDA_CHECK(call)                                                                 \
+    {                                                                                    \
+        cudaError_t err = call;                                                          \
+        if (err != cudaSuccess) {                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "         \
+                      << cudaGetErrorString(err) << std::endl;                           \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                                \
+    }
+// 核函数：线程块内使用共享内存进行归约
+__global__ void reduceSumWithSync(int *input, int *output, int N) {
+    // 分配共享内存
+    __shared__ int sharedData[256];
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    // 将全局内存数据加载到共享内存
+    if (tid < N) {
+        sharedData[threadIdx.x] = input[tid];
+    } else {
+        sharedData[threadIdx.x] = 0; // 超出数据范围时初始化为0
+    }
+    __syncthreads(); // 确保共享内存加载完成
+    // 使用二分归约算法在共享内存中计算
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (threadIdx.x < stride) {
+            sharedData[threadIdx.x] += sharedData[threadIdx.x + stride];
+        }
+        __syncthreads(); // 确保每轮计算完成后再进行下一轮
+    }
+    // 将每个线程块的归约结果写入全局内存
+    if (threadIdx.x == 0) {
+        output[blockIdx.x] = sharedData[0];
+    }
+}
+int main() {
+    const int N = 1024; // 数据大小
+    const int bytes = N * sizeof(int);
+    // 主机内存分配
+    int *hostInput = new int[N];
+    int *hostOutput = new int[(N + 255) / 256];
+    // 初始化输入数据
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = 1; // 所有元素初始化为1
+    }
+    // 设备内存分配
+    int *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, sizeof(int) * (N + 255) / 256));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    // 配置线程块和网格
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+    // 执行核函数
+    reduceSumWithSync<<<blocksPerGrid, threadsPerBlock>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 将结果传回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, sizeof(int) * blocksPerGrid, cudaMemcpyDeviceToHost));
+    // 最终归约结果
+    int finalSum = 0;
+    for (int i = 0; i < blocksPerGrid; ++i) {
+        finalSum += hostOutput[i];
+    }
+    // 打印结果
+    std::cout << "Final Sum: " << finalSum << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostInput;
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define CUDA_CHECK(call)                                                                 \
+    {                                                                                    \
+        cudaError_t err = call;                                                          \
+        if (err != cudaSuccess) {                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "         \
+                      << cudaGetErrorString(err) << std::endl;                           \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                                \
+    }
+// 核函数：使用Shuffle指令实现Warp内归约
+__inline__ __device__ int warpReduceSum(int val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset); // 邻近线程间交换数据
+    }
+    return val;
+}
+// 核函数：线程块内的归约计算
+__global__ void reduceKernel(const int *input, int *output, int N) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int lane = threadIdx.x % 32; // Warp内线程索引
+    int warpID = threadIdx.x / 32; // Warp编号
+    __shared__ int sharedData[32]; // 用于存储每个Warp的归约结果
+    // 每个线程加载一个数据
+    int value = (tid < N) ? input[tid] : 0;
+    // 使用Warp Shuffle进行归约
+    int warpSum = warpReduceSum(value);
+    // 每个Warp的线程0将结果写入共享内存
+    if (lane == 0) {
+        sharedData[warpID] = warpSum;
+    }
+    __syncthreads(); // 确保所有Warp结果已写入共享内存
+    // 线程块内线程0归约所有Warp的结果
+    if (threadIdx.x == 0) {
+        int blockSum = 0;
+        for (int i = 0; i < (blockDim.x + 31) / 32; ++i) {
+            blockSum += sharedData[i];
+        }
+        atomicAdd(output, blockSum); // 全局原子加
+    }
+}
+int main() {
+    const int N = 1024; // 输入数组大小
+    const size_t bytes = N * sizeof(int);
+    // 主机内存分配
+    int *hostInput = new int[N];
+    int hostOutput = 0;
+    // 初始化输入数据
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = 1; // 每个元素初始化为1
+    }
+    // 设备内存分配
+    int *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, sizeof(int)));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(deviceOutput, 0, sizeof(int)));
+    // 配置线程块和网格
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+    // 执行核函数
+    reduceKernel<<<blocksPerGrid, threadsPerBlock>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 将结果传回主机
+    CUDA_CHECK(cudaMemcpy(&hostOutput, deviceOutput, sizeof(int), cudaMemcpyDeviceToHost));
+    // 打印结果
+    std::cout << "Final Sum: " << hostOutput << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostInput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define CUDA_CHECK(call)                                                                 \
+    {                                                                                    \
+        cudaError_t err = call;                                                          \
+        if (err != cudaSuccess) {                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "         \
+                      << cudaGetErrorString(err) << std::endl;                           \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                                \
+    }
+// Warp级归约函数
+__inline__ __device__ int warpReduceSum(int val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+    }
+    return val;
+}
+// 线程块级归约函数
+__global__ void reduceLargeArray(const int *input, int *output, int N) {
+    __shared__ int sharedData[32]; // 每个Warp的归约结果存储
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int lane = threadIdx.x % 32;  // Warp内线程索引
+    int warpID = threadIdx.x / 32; // Warp编号
+    // 加载数据
+    int value = (tid < N) ? input[tid] : 0;
+    // 使用Warp级归约
+    int warpSum = warpReduceSum(value);
+    // 将Warp结果写入共享内存
+    if (lane == 0) {
+        sharedData[warpID] = warpSum;
+    }
+    __syncthreads();
+    // 线程块内归约所有Warp的结果
+    if (threadIdx.x == 0) {
+        int blockSum = 0;
+        for (int i = 0; i < (blockDim.x + 31) / 32; ++i) {
+            blockSum += sharedData[i];
+        }
+        atomicAdd(output, blockSum); // 全局原子加
+    }
+}
+int main() {
+    const int N = 1 << 20; // 数据大小（1百万个元素）
+    const size_t bytes = N * sizeof(int);
+    // 主机内存分配
+    int *hostInput = new int[N];
+    int hostOutput = 0;
+    // 初始化输入数据
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = 1; // 初始化为1，方便验证结果
+    }
+    // 设备内存分配
+    int *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, sizeof(int)));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(deviceOutput, 0, sizeof(int)));
+    // 配置线程块和网格
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+    // 执行核函数
+    reduceLargeArray<<<blocksPerGrid, threadsPerBlock>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 将结果传回主机
+    CUDA_CHECK(cudaMemcpy(&hostOutput, deviceOutput, sizeof(int), cudaMemcpyDeviceToHost));
+    // 打印结果
+    std::cout << "Final Sum: " << hostOutput << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostInput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <cooperative_groups.h>
+#include <iostream>
+#include <cstdlib>
+namespace cg = cooperative_groups;
+#define CUDA_CHECK(call)                                                                 \
+    {                                                                                    \
+        cudaError_t err = call;                                                          \
+        if (err != cudaSuccess) {                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "         \
+                      << cudaGetErrorString(err) << std::endl;                           \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                                \
+    }
+// 核函数：利用协作组实现块内归约
+__global__ void blockReduceSum(const int *input, int *output, int N) {
+    // 定义线程块范围的协作组
+    cg::thread_block block = cg::this_thread_block();
+    // 使用共享内存存储中间结果
+    __shared__ int sharedData[1024];
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // 加载数据到共享内存
+    int value = (tid < N) ? input[tid] : 0;
+    sharedData[threadIdx.x] = value;
+    // 同步线程块内所有线程，确保共享内存加载完成
+    block.sync();
+    // 归约操作：线程块范围
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (threadIdx.x < stride) {
+            sharedData[threadIdx.x] += sharedData[threadIdx.x + stride];
+        }
+        block.sync(); // 每次归约后同步
+    }
+    // 将结果写入全局内存
+    if (threadIdx.x == 0) {
+        output[blockIdx.x] = sharedData[0];
+    }
+}
+int main() {
+    const int N = 1 << 20; // 数据大小（1百万个元素）
+    const size_t bytes = N * sizeof(int);
+    // 主机内存分配
+    int *hostInput = new int[N];
+    int *hostOutput;
+    int hostFinalResult = 0;
+    // 初始化输入数据
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = 1; // 初始化为1，方便验证结果
+    }
+    // 设备内存分配
+    int *deviceInput, *deviceOutput;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, sizeof(int) * 1024)); // 每个块的结果
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    // 配置线程块和网格
+    int threadsPerBlock = 1024;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+    // 执行核函数
+    blockReduceSum<<<blocksPerGrid, threadsPerBlock>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 分配主机内存存储中间结果
+    hostOutput = new int[blocksPerGrid];
+    // 将中间结果传回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, sizeof(int) * blocksPerGrid, cudaMemcpyDeviceToHost));
+    // 在主机完成最终归约
+    for (int i = 0; i < blocksPerGrid; ++i) {
+        hostFinalResult += hostOutput[i];
+    }
+    // 打印结果
+    std::cout << "Final Sum: " << hostFinalResult << std::endl;
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    delete[] hostInput;
+    delete[] hostOutput;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define CUDA_CHECK(call)                                                                 \
+    {                                                                                    \
+        cudaError_t err = call;                                                          \
+        if (err != cudaSuccess) {                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "         \
+                      << cudaGetErrorString(err) << std::endl;                           \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                                \
+    }
+// 核函数：线程块范围内的前缀和
+__global__ void blockPrefixSum(int *input, int *output, int N) {
+    extern __shared__ int sharedData[]; // 动态共享内存
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int tx = threadIdx.x;
+    // 将数据加载到共享内存
+    if (tid < N) {
+        sharedData[tx] = input[tid];
+    } else {
+        sharedData[tx] = 0;
+    }
+    __syncthreads();
+    // 前缀和计算
+    for (int stride = 1; stride < blockDim.x; stride *= 2) {
+        int temp = 0;
+        if (tx >= stride) {
+            temp = sharedData[tx - stride];
+        }
+        __syncthreads(); // 确保读取完成
+        sharedData[tx] += temp;
+        __syncthreads(); // 确保写入完成
+    }
+    // 写入输出
+    if (tid < N) {
+        output[tid] = sharedData[tx];
+    }
+}
+// 核函数：调整线程块结果
+__global__ void adjustBlocks(int *output, int *blockSums, int N) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blockIdx.x > 0 && tid < N) {
+        output[tid] += blockSums[blockIdx.x - 1];
+    }
+}
+// 主函数
+int main() {
+    const int N = 1 << 20; // 数据大小（1百万个元素）
+    const int blockSize = 1024; // 每个线程块的线程数
+    const int gridSize = (N + blockSize - 1) / blockSize; // 网格大小
+    size_t bytes = N * sizeof(int);
+    size_t blockSumBytes = gridSize * sizeof(int);
+    // 主机内存分配
+    int *hostInput = new int[N];
+    int *hostOutput = new int[N];
+    // 初始化输入数据
+    for (int i = 0; i < N; ++i) {
+        hostInput[i] = 1; // 每个元素为1，便于验证
+    }
+    // 设备内存分配
+    int *deviceInput, *deviceOutput, *blockSums;
+    CUDA_CHECK(cudaMalloc(&deviceInput, bytes));
+    CUDA_CHECK(cudaMalloc(&deviceOutput, bytes));
+    CUDA_CHECK(cudaMalloc(&blockSums, blockSumBytes));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceInput, hostInput, bytes, cudaMemcpyHostToDevice));
+    // 执行前缀和核函数
+    blockPrefixSum<<<gridSize, blockSize, blockSize * sizeof(int)>>>(deviceInput, deviceOutput, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 提取每个线程块的最后一个元素作为块和
+    blockPrefixSum<<<1, gridSize, gridSize * sizeof(int)>>>(deviceOutput + blockSize - 1, blockSums, gridSize);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 调整线程块结果
+    adjustBlocks<<<gridSize, blockSize>>>(deviceOutput, blockSums, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 将结果传回主机
+    CUDA_CHECK(cudaMemcpy(hostOutput, deviceOutput, bytes, cudaMemcpyDeviceToHost));
+    // 验证结果
+    bool success = true;
+    for (int i = 0; i < N; ++i) {
+        if (hostOutput[i] != i + 1) {
+            success = false;
+            break;
+        }
+    }
+    if (success) {
+        std::cout << "Prefix sum computed successfully." << std::endl;
+    } else {
+        std::cout << "Error in prefix sum computation." << std::endl;
+    }
+    // 清理内存
+    CUDA_CHECK(cudaFree(deviceInput));
+    CUDA_CHECK(cudaFree(deviceOutput));
+    CUDA_CHECK(cudaFree(blockSums));
+    delete[] hostInput;
+    delete[] hostOutput;
+    return 0;
+}

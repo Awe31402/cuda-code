@@ -1,0 +1,521 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <stdio.h>
+__global__ void kernel_add(int *a, int *b, int *c, int size) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < size) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+void initialize_array(int *arr, int size, int value) {
+    for (int i = 0; i < size; ++i) {
+        arr[i] = value + i;
+    }
+}
+int main() {
+    const int size = 1024;
+    const int bytes = size * sizeof(int);
+    int *h_a, *h_b, *h_c;
+    int *d_a, *d_b, *d_c;
+    cudaMallocHost(&h_a, bytes);
+    cudaMallocHost(&h_b, bytes);
+    cudaMallocHost(&h_c, bytes);
+    cudaMalloc(&d_a, bytes);
+    cudaMalloc(&d_b, bytes);
+    cudaMalloc(&d_c, bytes);
+    initialize_array(h_a, size, 1);
+    initialize_array(h_b, size, 10);
+    cudaStream_t stream1, stream2;
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+    cudaMemcpyAsync(d_a, h_a, bytes, cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_b, h_b, bytes, cudaMemcpyHostToDevice, stream2);
+    int threads = 256;
+    int blocks = (size + threads - 1) / threads;
+    kernel_add<<<blocks, threads, 0, stream1>>>(d_a, d_b, d_c, size / 2);
+    kernel_add<<<blocks, threads, 0, stream2>>>(d_a + size / 2, d_b + size / 2, d_c + size / 2, size / 2);
+    cudaMemcpyAsync(h_c, d_c, bytes, cudaMemcpyDeviceToHost, stream1);
+    cudaMemcpyAsync(h_c + size / 2, d_c + size / 2, bytes / 2, cudaMemcpyDeviceToHost, stream2);
+    cudaStreamSynchronize(stream1);
+    cudaStreamSynchronize(stream2);
+    printf("Result: ");
+    for (int i = 0; i < size; ++i) {
+        printf("%d ", h_c[i]);
+    }
+    printf("\n");
+    cudaStreamDestroy(stream1);
+    cudaStreamDestroy(stream2);
+    cudaFreeHost(h_a);
+    cudaFreeHost(h_b);
+    cudaFreeHost(h_c);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include <chrono>
+__global__ void kernel_add(int *a, int *b, int *c, int size) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < size) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+void initialize_array(int *arr, int size, int value) {
+    for (int i = 0; i < size; ++i) {
+        arr[i] = value + i;
+    }
+}
+void measure_single_stream(int *h_a, int *h_b, int *h_c, int size, int bytes) {
+    int *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, bytes);
+    cudaMalloc(&d_b, bytes);
+    cudaMalloc(&d_c, bytes);
+    auto start = std::chrono::high_resolution_clock::now();
+    cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
+    int threads = 256;
+    int blocks = (size + threads - 1) / threads;
+    kernel_add<<<blocks, threads>>>(d_a, d_b, d_c, size);
+    cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+    auto end = std::chrono::high_resolution_clock::now();
+    printf("Single Stream Execution Time: %.3f ms\n", 
+        std::chrono::duration<float, std::milli>(end - start).count());
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+}
+void measure_multi_stream(int *h_a, int *h_b, int *h_c, int size, int bytes) {
+    int *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, bytes);
+    cudaMalloc(&d_b, bytes);
+    cudaMalloc(&d_c, bytes);
+    cudaStream_t stream1, stream2;
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+    auto start = std::chrono::high_resolution_clock::now();
+    cudaMemcpyAsync(d_a, h_a, bytes / 2, cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_b, h_b, bytes / 2, cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_a + size / 2, h_a + size / 2, bytes / 2, cudaMemcpyHostToDevice, stream2);
+    cudaMemcpyAsync(d_b + size / 2, h_b + size / 2, bytes / 2, cudaMemcpyHostToDevice, stream2);
+    int threads = 256;
+    int blocks = (size / 2 + threads - 1) / threads;
+    kernel_add<<<blocks, threads, 0, stream1>>>(d_a, d_b, d_c, size / 2);
+    kernel_add<<<blocks, threads, 0, stream2>>>(d_a + size / 2, d_b + size / 2, d_c + size / 2, size / 2);
+    cudaMemcpyAsync(h_c, d_c, bytes / 2, cudaMemcpyDeviceToHost, stream1);
+    cudaMemcpyAsync(h_c + size / 2, d_c + size / 2, bytes / 2, cudaMemcpyDeviceToHost, stream2);
+    cudaStreamSynchronize(stream1);
+    cudaStreamSynchronize(stream2);
+    auto end = std::chrono::high_resolution_clock::now();
+    printf("Multi-Stream Execution Time: %.3f ms\n", 
+        std::chrono::duration<float, std::milli>(end - start).count());
+    cudaStreamDestroy(stream1);
+    cudaStreamDestroy(stream2);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+}
+int main() {
+    const int size = 1024 * 1024;
+    const int bytes = size * sizeof(int);
+    int *h_a, *h_b, *h_c;
+    cudaMallocHost(&h_a, bytes);
+    cudaMallocHost(&h_b, bytes);
+    cudaMallocHost(&h_c, bytes);
+    initialize_array(h_a, size, 1);
+    initialize_array(h_b, size, 10);
+    measure_single_stream(h_a, h_b, h_c, size, bytes);
+    measure_multi_stream(h_a, h_b, h_c, size, bytes);
+    cudaFreeHost(h_a);
+    cudaFreeHost(h_b);
+    cudaFreeHost(h_c);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include <chrono>
+// 核函数：将两个数组中的元素逐个相加
+__global__ void vector_add(const int *a, const int *b, int *c, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+// 初始化数组
+void initialize_array(int *arr, int size, int value) {
+    for (int i = 0; i < size; ++i) {
+        arr[i] = value + i;
+    }
+}
+// 异步数据传输与核函数并行执行
+void async_transfer_and_compute(int *h_a, int *h_b, int *h_c, int size, int bytes) {
+    int *d_a, *d_b, *d_c;
+    cudaStream_t stream1, stream2;
+    // 分配设备内存
+    cudaMalloc(&d_a, bytes);
+    cudaMalloc(&d_b, bytes);
+    cudaMalloc(&d_c, bytes);
+    // 创建流
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+    auto start = std::chrono::high_resolution_clock::now();
+    // 异步将数据传输到设备
+    cudaMemcpyAsync(d_a, h_a, bytes, cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_b, h_b, bytes, cudaMemcpyHostToDevice, stream2);
+    // 确保数据传输完成后启动核函数
+    int threads = 256;
+    int blocks = (size + threads - 1) / threads;
+    vector_add<<<blocks, threads, 0, stream1>>>(d_a, d_b, d_c, size);
+    // 异步将结果传回主机
+    cudaMemcpyAsync(h_c, d_c, bytes, cudaMemcpyDeviceToHost, stream1);
+    // 等待所有任务完成
+    cudaStreamSynchronize(stream1);
+    cudaStreamSynchronize(stream2);
+    auto end = std::chrono::high_resolution_clock::now();
+    printf("Execution Time: %.3f ms\n", 
+        std::chrono::duration<float, std::milli>(end - start).count());
+    // 销毁流和释放内存
+    cudaStreamDestroy(stream1);
+    cudaStreamDestroy(stream2);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+}
+int main() {
+    const int size = 1024 * 1024; // 1M元素
+    const int bytes = size * sizeof(int);
+    int *h_a, *h_b, *h_c;
+    cudaMallocHost(&h_a, bytes);
+    cudaMallocHost(&h_b, bytes);
+    cudaMallocHost(&h_c, bytes);
+    initialize_array(h_a, size, 1);
+    initialize_array(h_b, size, 2);
+    async_transfer_and_compute(h_a, h_b, h_c, size, bytes);
+    // 验证结果
+    bool success = true;
+    for (int i = 0; i < size; ++i) {
+        if (h_c[i] != h_a[i] + h_b[i]) {
+            success = false;
+            printf("Error at index %d: %d != %d + %d\n", i, h_c[i], h_a[i], h_b[i]);
+            break;
+        }
+    }
+    if (success) {
+        printf("Results are correct.\n");
+    }
+    cudaFreeHost(h_a);
+    cudaFreeHost(h_b);
+    cudaFreeHost(h_c);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include <chrono>
+// 核函数：矩阵加法
+__global__ void matrix_add(const float *a, const float *b, float *c, int rows, int cols) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idy = blockIdx.y * blockDim.y + threadIdx.y;
+    int index = idy * cols + idx;
+    if (idx < cols && idy < rows) {
+        c[index] = a[index] + b[index];
+    }
+}
+// 初始化矩阵
+void initialize_matrix(float *matrix, int rows, int cols, float value) {
+    for (int i = 0; i < rows * cols; ++i) {
+        matrix[i] = value + i % 10;
+    }
+}
+// 分块处理矩阵加法
+void block_matrix_addition(int rows, int cols, int block_size) {
+    const int matrix_size = rows * cols;
+    const int bytes = matrix_size * sizeof(float);
+    float *h_a, *h_b, *h_c;
+    cudaMallocHost(&h_a, bytes);
+    cudaMallocHost(&h_b, bytes);
+    cudaMallocHost(&h_c, bytes);
+    initialize_matrix(h_a, rows, cols, 1.0f);
+    initialize_matrix(h_b, rows, cols, 2.0f);
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, bytes);
+    cudaMalloc(&d_b, bytes);
+    cudaMalloc(&d_c, bytes);
+    int blocks_per_row = (cols + block_size - 1) / block_size;
+    int blocks_per_col = (rows + block_size - 1) / block_size;
+    dim3 threads(block_size, block_size);
+    dim3 blocks(blocks_per_row, blocks_per_col);
+    cudaStream_t streams[2];
+    cudaStreamCreate(&streams[0]);
+    cudaStreamCreate(&streams[1]);
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int block_id = 0; block_id < 2; ++block_id) {
+        int offset = block_id * (matrix_size / 2);
+        cudaMemcpyAsync(d_a + offset, h_a + offset, bytes / 2, cudaMemcpyHostToDevice, streams[block_id]);
+        cudaMemcpyAsync(d_b + offset, h_b + offset, bytes / 2, cudaMemcpyHostToDevice, streams[block_id]);
+        matrix_add<<<blocks, threads, 0, streams[block_id]>>>(d_a + offset, d_b + offset, d_c + offset, rows / 2, cols);
+        cudaMemcpyAsync(h_c + offset, d_c + offset, bytes / 2, cudaMemcpyDeviceToHost, streams[block_id]);
+    }
+    cudaStreamSynchronize(streams[0]);
+    cudaStreamSynchronize(streams[1]);
+    auto end = std::chrono::high_resolution_clock::now();
+    printf("Execution Time: %.3f ms\n", 
+        std::chrono::duration<float, std::milli>(end - start).count());
+    bool success = true;
+    for (int i = 0; i < matrix_size; ++i) {
+        if (h_c[i] != h_a[i] + h_b[i]) {
+            success = false;
+            printf("Error at index %d: %f != %f + %f\n", i, h_c[i], h_a[i], h_b[i]);
+            break;
+        }
+    }
+    if (success) {
+        printf("Results are correct.\n");
+    }
+    cudaFreeHost(h_a);
+    cudaFreeHost(h_b);
+    cudaFreeHost(h_c);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    cudaStreamDestroy(streams[0]);
+    cudaStreamDestroy(streams[1]);
+}
+int main() {
+    int rows = 1024;
+    int cols = 1024;
+    int block_size = 16;
+    block_matrix_addition(rows, cols, block_size);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 定义矩阵大小
+#define N 256
+// 核函数模拟任务
+__global__ void simpleKernel(float* data, int stream_id) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < N) {
+        data[idx] += stream_id;  // 模拟不同流的操作
+    }
+}
+int main() {
+    // 定义变量
+    float* d_data1;
+    float* d_data2;
+    float h_data1[N];
+    float h_data2[N];
+    // 初始化主机数据
+    for (int i = 0; i < N; i++) {
+        h_data1[i] = 0.0f;
+        h_data2[i] = 0.0f;
+    }
+    // 设备内存分配
+    cudaMalloc((void**)&d_data1, N * sizeof(float));
+    cudaMalloc((void**)&d_data2, N * sizeof(float));
+    // 创建两个不同优先级的流
+    cudaStream_t high_priority_stream, low_priority_stream;
+    int leastPriority, greatestPriority;
+    cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority);
+    cudaStreamCreateWithPriority(&high_priority_stream, cudaStreamNonBlocking, greatestPriority);
+    cudaStreamCreateWithPriority(&low_priority_stream, cudaStreamNonBlocking, leastPriority);
+    // 数据传输到设备
+    cudaMemcpyAsync(d_data1, h_data1, N * sizeof(float), cudaMemcpyHostToDevice, high_priority_stream);
+    cudaMemcpyAsync(d_data2, h_data2, N * sizeof(float), cudaMemcpyHostToDevice, low_priority_stream);
+    // 启动核函数
+    simpleKernel<<<(N + 255) / 256, 256, 0, high_priority_stream>>>(d_data1, 1);
+    simpleKernel<<<(N + 255) / 256, 256, 0, low_priority_stream>>>(d_data2, 2);
+    // 结果传回主机
+    cudaMemcpyAsync(h_data1, d_data1, N * sizeof(float), cudaMemcpyDeviceToHost, high_priority_stream);
+    cudaMemcpyAsync(h_data2, d_data2, N * sizeof(float), cudaMemcpyDeviceToHost, low_priority_stream);
+    // 等待流完成
+    cudaStreamSynchronize(high_priority_stream);
+    cudaStreamSynchronize(low_priority_stream);
+    // 打印部分结果
+    std::cout << "High priority stream results:\n";
+    for (int i = 0; i < 10; i++) {
+        std::cout << h_data1[i] << " ";
+    }
+    std::cout << "\n";
+    std::cout << "Low priority stream results:\n";
+    for (int i = 0; i < 10; i++) {
+        std::cout << h_data2[i] << " ";
+    }
+    std::cout << "\n";
+    // 清理资源
+    cudaStreamDestroy(high_priority_stream);
+    cudaStreamDestroy(low_priority_stream);
+    cudaFree(d_data1);
+    cudaFree(d_data2);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#define DATA_SIZE 1024
+#define BLOCK_SIZE 256
+// 核函数模拟不同任务
+__global__ void computeTask(float* data, int offset, float factor) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < DATA_SIZE) {
+        data[idx] += (offset + idx) * factor;
+    }
+}
+int main() {
+    float *d_data1, *d_data2, *d_data3;
+    float h_data1[DATA_SIZE], h_data2[DATA_SIZE], h_data3[DATA_SIZE];
+    for (int i = 0; i < DATA_SIZE; i++) {
+        h_data1[i] = 0.0f;
+        h_data2[i] = 0.0f;
+        h_data3[i] = 0.0f;
+    }
+    cudaMalloc((void**)&d_data1, DATA_SIZE * sizeof(float));
+    cudaMalloc((void**)&d_data2, DATA_SIZE * sizeof(float));
+    cudaMalloc((void**)&d_data3, DATA_SIZE * sizeof(float));
+    cudaStream_t stream1, stream2, stream3;
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+    cudaStreamCreate(&stream3);
+    cudaMemcpyAsync(d_data1, h_data1, DATA_SIZE * sizeof(float), cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_data2, h_data2, DATA_SIZE * sizeof(float), cudaMemcpyHostToDevice, stream2);
+    cudaMemcpyAsync(d_data3, h_data3, DATA_SIZE * sizeof(float), cudaMemcpyHostToDevice, stream3);
+    computeTask<<<(DATA_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream1>>>(d_data1, 1, 1.5f);
+    computeTask<<<(DATA_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream2>>>(d_data2, 2, 2.0f);
+    computeTask<<<(DATA_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream3>>>(d_data3, 3, 2.5f);
+    cudaMemcpyAsync(h_data1, d_data1, DATA_SIZE * sizeof(float), cudaMemcpyDeviceToHost, stream1);
+    cudaMemcpyAsync(h_data2, d_data2, DATA_SIZE * sizeof(float), cudaMemcpyDeviceToHost, stream2);
+    cudaMemcpyAsync(h_data3, d_data3, DATA_SIZE * sizeof(float), cudaMemcpyDeviceToHost, stream3);
+    cudaStreamSynchronize(stream1);
+    cudaStreamSynchronize(stream2);
+    cudaStreamSynchronize(stream3);
+    std::cout << "Stream1 results: ";
+    for (int i = 0; i < 10; i++) {
+        std::cout << h_data1[i] << " ";
+    }
+    std::cout << "\n";
+    std::cout << "Stream2 results: ";
+    for (int i = 0; i < 10; i++) {
+        std::cout << h_data2[i] << " ";
+    }
+    std::cout << "\n";
+    std::cout << "Stream3 results: ";
+    for (int i = 0; i < 10; i++) {
+        std::cout << h_data3[i] << " ";
+    }
+    std::cout << "\n";
+    cudaStreamDestroy(stream1);
+    cudaStreamDestroy(stream2);
+    cudaStreamDestroy(stream3);
+    cudaFree(d_data1);
+    cudaFree(d_data2);
+    cudaFree(d_data3);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define N 1024  // 矩阵维度
+#define BLOCK_SIZE 32  // 线程块大小
+// 核函数：矩阵加法
+__global__ void matrixAdd(const float* A, const float* B, float* C, int size) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < size && col < size) {
+        int idx = row * size + col;
+        C[idx] = A[idx] + B[idx];
+    }
+}
+int main() {
+    const int matrixSize = N * N;
+    const int matrixBytes = matrixSize * sizeof(float);
+    float *h_A, *h_B, *h_C;  // 主机内存
+    float *d_A1, *d_B1, *d_C1;  // 设备内存（流1）
+    float *d_A2, *d_B2, *d_C2;  // 设备内存（流2）
+    cudaStream_t stream1, stream2;  // 创建流
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+    // 分配主机内存
+    h_A = (float*)malloc(matrixBytes);
+    h_B = (float*)malloc(matrixBytes);
+    h_C = (float*)malloc(matrixBytes);
+    // 初始化矩阵
+    for (int i = 0; i < matrixSize; ++i) {
+        h_A[i] = static_cast<float>(rand()) / RAND_MAX;
+        h_B[i] = static_cast<float>(rand()) / RAND_MAX;
+    }
+    // 分配设备内存
+    cudaMalloc((void**)&d_A1, matrixBytes / 2);
+    cudaMalloc((void**)&d_B1, matrixBytes / 2);
+    cudaMalloc((void**)&d_C1, matrixBytes / 2);
+    cudaMalloc((void**)&d_A2, matrixBytes / 2);
+    cudaMalloc((void**)&d_B2, matrixBytes / 2);
+    cudaMalloc((void**)&d_C2, matrixBytes / 2);
+    // 设置CUDA网格与线程块大小
+    dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 grid((N / 2 + block.x - 1) / block.x, (N + block.y - 1) / block.y);
+    // 分块传输数据并执行加法
+    cudaMemcpyAsync(d_A1, h_A, matrixBytes / 2, cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_B1, h_B, matrixBytes / 2, cudaMemcpyHostToDevice, stream1);
+    matrixAdd<<<grid, block, 0, stream1>>>(d_A1, d_B1, d_C1, N / 2);
+    cudaMemcpyAsync(h_C, d_C1, matrixBytes / 2, cudaMemcpyDeviceToHost, stream1);
+    cudaMemcpyAsync(d_A2, h_A + matrixSize / 2, matrixBytes / 2, cudaMemcpyHostToDevice, stream2);
+    cudaMemcpyAsync(d_B2, h_B + matrixSize / 2, matrixBytes / 2, cudaMemcpyHostToDevice, stream2);
+    matrixAdd<<<grid, block, 0, stream2>>>(d_A2, d_B2, d_C2, N / 2);
+    cudaMemcpyAsync(h_C + matrixSize / 2, d_C2, matrixBytes / 2, cudaMemcpyDeviceToHost, stream2);
+    // 同步流
+    cudaStreamSynchronize(stream1);
+    cudaStreamSynchronize(stream2);
+    // 检查结果
+    std::cout << "Sample results from C:\n";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << h_C[i] << " ";
+    }
+    std::cout << "\n";
+    // 清理内存与流
+    cudaFree(d_A1);
+    cudaFree(d_B1);
+    cudaFree(d_C1);
+    cudaFree(d_A2);
+    cudaFree(d_B2);
+    cudaFree(d_C2);
+    free(h_A);
+    free(h_B);
+    free(h_C);
+    cudaStreamDestroy(stream1);
+    cudaStreamDestroy(stream2);
+    return 0;
+}
+
+

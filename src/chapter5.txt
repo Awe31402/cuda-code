@@ -1,0 +1,510 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 宏定义：通用错误检测函数
+#define CHECK_CUDA_ERROR(call)                                                     \
+    {                                                                              \
+        cudaError_t err = call;                                                    \
+        if (err != cudaSuccess) {                                                  \
+            std::cerr << "CUDA错误: " << cudaGetErrorString(err)                   \
+                      << " 在文件 " << __FILE__                                    \
+                      << " 的第 " << __LINE__ << " 行" << std::endl;              \
+            exit(EXIT_FAILURE);                                                    \
+        }                                                                          \
+    }
+// 核函数：简单向量加法
+__global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+int main() {
+    const int N = 1024;
+    const int bytes = N * sizeof(float);
+    // 主机内存分配
+    float *hostA = new float[N];
+    float *hostB = new float[N];
+    float *hostC = new float[N];
+    // 初始化主机数据
+    for (int i = 0; i < N; ++i) {
+        hostA[i] = static_cast<float>(i);
+        hostB[i] = static_cast<float>(i * 2);
+    }
+    // 设备内存分配
+    float *deviceA, *deviceB, *deviceC;
+    CHECK_CUDA_ERROR(cudaMalloc(&deviceA, bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(&deviceB, bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(&deviceC, bytes));
+    // 数据传输：主机到设备
+    CHECK_CUDA_ERROR(cudaMemcpy(deviceA, hostA, bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR(cudaMemcpy(deviceB, hostB, bytes, cudaMemcpyHostToDevice));
+    // 启动核函数
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    vectorAdd<<<gridSize, blockSize>>>(deviceA, deviceB, deviceC, N);
+    // 检查核函数执行错误
+    CHECK_CUDA_ERROR(cudaGetLastError());
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+    // 数据传输：设备到主机
+    CHECK_CUDA_ERROR(cudaMemcpy(hostC, deviceC, bytes, cudaMemcpyDeviceToHost));
+    // 验证结果
+    bool correct = true;
+    for (int i = 0; i < N; ++i) {
+        if (hostC[i] != hostA[i] + hostB[i]) {
+            correct = false;
+            break;
+        }
+    }
+    std::cout << "结果验证: " << (correct ? "正确" : "错误") << std::endl;
+    // 清理资源
+    CHECK_CUDA_ERROR(cudaFree(deviceA));
+    CHECK_CUDA_ERROR(cudaFree(deviceB));
+    CHECK_CUDA_ERROR(cudaFree(deviceC));
+    delete[] hostA;
+    delete[] hostB;
+    delete[] hostC;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <fstream>
+#include <ctime>
+// 宏定义：通用错误检测与日志记录
+#define CHECK_CUDA_ERROR(call)                                                       \
+    {                                                                                \
+        cudaError_t err = call;                                                      \
+        if (err != cudaSuccess) {                                                    \
+            std::ofstream logFile("cuda_error.log", std::ios::app);                  \
+            time_t now = time(0);                                                    \
+            char* dt = ctime(&now);                                                  \
+            std::cerr << "CUDA错误: " << cudaGetErrorString(err)                     \
+                      << " 在文件 " << __FILE__                                      \
+                      << " 的第 " << __LINE__ << " 行" << std::endl;                \
+            if (logFile.is_open()) {                                                 \
+                logFile << "[" << dt << "] CUDA错误: " << cudaGetErrorString(err)    \
+                        << " 在文件 " << __FILE__                                    \
+                        << " 的第 " << __LINE__ << " 行" << std::endl;              \
+                logFile.close();                                                     \
+            }                                                                        \
+            exit(EXIT_FAILURE);                                                      \
+        }                                                                            \
+    }
+// 核函数：简单向量加法
+__global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+int main() {
+    const int N = 1024;
+    const int bytes = N * sizeof(float);
+    std::cout << "主机内存分配中..." << std::endl;
+    float *hostA = new float[N];
+    float *hostB = new float[N];
+    float *hostC = new float[N];
+    for (int i = 0; i < N; ++i) {
+        hostA[i] = static_cast<float>(i);
+        hostB[i] = static_cast<float>(i * 2);
+    }
+    std::cout << "设备内存分配中..." << std::endl;
+    float *deviceA, *deviceB, *deviceC;
+    CHECK_CUDA_ERROR(cudaMalloc(&deviceA, bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(&deviceB, bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(&deviceC, bytes));
+    std::cout << "数据传输到设备中..." << std::endl;
+    CHECK_CUDA_ERROR(cudaMemcpy(deviceA, hostA, bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR(cudaMemcpy(deviceB, hostB, bytes, cudaMemcpyHostToDevice));
+    std::cout << "启动核函数进行计算..." << std::endl;
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    vectorAdd<<<gridSize, blockSize>>>(deviceA, deviceB, deviceC, N);
+    CHECK_CUDA_ERROR(cudaGetLastError());
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+    std::cout << "从设备传输结果到主机中..." << std::endl;
+    CHECK_CUDA_ERROR(cudaMemcpy(hostC, deviceC, bytes, cudaMemcpyDeviceToHost));
+    std::cout << "验证计算结果中..." << std::endl;
+    bool correct = true;
+    for (int i = 0; i < N; ++i) {
+        if (hostC[i] != hostA[i] + hostB[i]) {
+            correct = false;
+            break;
+        }
+    }
+    std::cout << "结果验证: " << (correct ? "正确" : "错误") << std::endl;
+    std::cout << "释放资源中..." << std::endl;
+    CHECK_CUDA_ERROR(cudaFree(deviceA));
+    CHECK_CUDA_ERROR(cudaFree(deviceB));
+    CHECK_CUDA_ERROR(cudaFree(deviceC));
+    delete[] hostA;
+    delete[] hostB;
+    delete[] hostC;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 核函数：简单矩阵加法
+__global__ void matrixAdd(const float *a, const float *b, float *c, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n * n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+int main() {
+    const int N = 10; // 矩阵大小为10x10
+    const int size = N * N * sizeof(float);
+    // 分配主机内存
+    float *hostA = new float[N * N];
+    float *hostB = new float[N * N];
+    float *hostC = new float[N * N]; // 故意不初始化hostC
+    for (int i = 0; i < N * N; ++i) {
+        hostA[i] = static_cast<float>(i);
+        hostB[i] = static_cast<float>(i * 2);
+    }
+    // 分配设备内存
+    float *deviceA, *deviceB, *deviceC;
+    cudaMalloc(&deviceA, size);
+    cudaMalloc(&deviceB, size);
+    cudaMalloc(&deviceC, size);
+    // 将数据从主机传输到设备
+    cudaMemcpy(deviceA, hostA, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(deviceB, hostB, size, cudaMemcpyHostToDevice);
+    // 启动核函数
+    dim3 blockSize(256);
+    dim3 gridSize((N * N + blockSize.x - 1) / blockSize.x);
+    matrixAdd<<<gridSize, blockSize>>>(deviceA, deviceB, deviceC, N);
+    // 从设备传输结果到主机
+    cudaMemcpy(hostC, deviceC, size, cudaMemcpyDeviceToHost);
+    // 故意访问未分配的内存（模拟内存越界）
+    std::cout << "模拟内存越界访问: " << hostC[N * N + 1] << std::endl;
+    // 释放设备内存
+    cudaFree(deviceA);
+    cudaFree(deviceB);
+    cudaFree(deviceC);
+    // 释放主机内存
+    delete[] hostA;
+    delete[] hostB;
+    delete[] hostC;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 核函数：数据竞争演示
+__global__ void incrementArrayRaceCondition(int *data, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n) {
+        data[0] += 1; // 产生数据竞争
+    }
+}
+// 核函数：使用原子操作解决数据竞争
+__global__ void incrementArrayAtomic(int *data, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n) {
+        atomicAdd(&data[0], 1); // 使用原子操作消除数据竞争
+    }
+}
+int main() {
+    const int N = 1024; // 总线程数
+    const int bytes = sizeof(int);
+    // 分配设备内存
+    int *deviceData;
+    cudaMalloc(&deviceData, bytes);
+    // 初始化数据
+    int initialValue = 0;
+    cudaMemcpy(deviceData, &initialValue, bytes, cudaMemcpyHostToDevice);
+    // 设置线程块和网格大小
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    std::cout << "运行产生数据竞争的核函数..." << std::endl;
+    incrementArrayRaceCondition<<<gridSize, blockSize>>>(deviceData, N);
+    cudaDeviceSynchronize();
+    // 检查结果
+    int result;
+    cudaMemcpy(&result, deviceData, bytes, cudaMemcpyDeviceToHost);
+    std::cout << "数据竞争情况下的结果: " << result << " (期望值: " << N << ")" << std::endl;
+    // 重置数据
+    cudaMemcpy(deviceData, &initialValue, bytes, cudaMemcpyHostToDevice);
+    std::cout << "运行使用原子操作的核函数..." << std::endl;
+    incrementArrayAtomic<<<gridSize, blockSize>>>(deviceData, N);
+    cudaDeviceSynchronize();
+    // 检查结果
+    cudaMemcpy(&result, deviceData, bytes, cudaMemcpyDeviceToHost);
+    std::cout << "使用原子操作情况下的结果: " << result << " (期望值: " << N << ")" << std::endl;
+    // 释放设备内存
+    cudaFree(deviceData);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 核函数：分支逻辑调试
+__global__ void branchDebugKernel(int *data, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n) {
+        if (data[idx] % 2 == 0) {
+            printf("线程 %d 属于偶数分支，数据值: %d\n", idx, data[idx]);
+        } else {
+            printf("线程 %d 属于奇数分支，数据值: %d\n", idx, data[idx]);
+        }
+    }
+}
+int main() {
+    const int N = 16;
+    const int bytes = N * sizeof(int);
+    // 分配主机内存并初始化数据
+    int hostData[N];
+    for (int i = 0; i < N; ++i) {
+        hostData[i] = i + 1;
+    }
+    // 分配设备内存并拷贝数据
+    int *deviceData;
+    cudaMalloc(&deviceData, bytes);
+    cudaMemcpy(deviceData, hostData, bytes, cudaMemcpyHostToDevice);
+    // 启动核函数
+    const int blockSize = 8;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    branchDebugKernel<<<gridSize, blockSize>>>(deviceData, N);
+    cudaDeviceSynchronize();
+    // 释放设备内存
+    cudaFree(deviceData);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 核函数：演示分支发散
+__global__ void branchDivergenceKernel(int *data, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n) {
+        if (idx % 2 == 0) { // 偶数路径
+            data[idx] = idx * 2;
+        } else {            // 奇数路径
+            data[idx] = idx * 3;
+        }
+    }
+}
+int main() {
+    const int N = 1024;
+    const int bytes = N * sizeof(int);
+    int *hostData = new int[N];  // 分配主机内存
+    int *deviceData;
+    cudaMalloc(&deviceData, bytes);  // 分配设备内存
+    const int blockSize = 256;  // 设置线程块大小
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    branchDivergenceKernel<<<gridSize, blockSize>>>(deviceData, N);  // 启动核函数
+    cudaDeviceSynchronize();
+    cudaMemcpy(hostData, deviceData, bytes, cudaMemcpyDeviceToHost);  // 将结果从设备拷贝回主机
+    for (int i = 0; i < 10; ++i) {  // 打印部分结果
+        std::cout << "数据[" << i << "]: " << hostData[i] << std::endl;
+    }
+    cudaFree(deviceData);  // 释放设备内存
+    delete[] hostData;  // 释放主机内存
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 核函数：矩阵乘法
+__global__ void matrixMul(const float *a, const float *b, float *c, int n) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < n && col < n) {
+        float value = 0.0f;
+        for (int k = 0; k < n; ++k) {
+            value += a[row * n + k] * b[k * n + col];
+        }
+        c[row * n + col] = value;
+    }
+}
+int main() {
+    const int N = 256;
+    const int bytes = N * N * sizeof(float);
+    float *hostA = new float[N * N];
+    float *hostB = new float[N * N];
+    float *hostC = new float[N * N];
+    for (int i = 0; i < N * N; ++i) {
+        hostA[i] = static_cast<float>(i % 100);
+        hostB[i] = static_cast<float>((i + 1) % 100);
+    }
+    float *deviceA, *deviceB, *deviceC;
+    cudaMalloc(&deviceA, bytes);
+    cudaMalloc(&deviceB, bytes);
+    cudaMalloc(&deviceC, bytes);
+    cudaMemcpy(deviceA, hostA, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(deviceB, hostB, bytes, cudaMemcpyHostToDevice);
+    dim3 blockSize(16, 16);
+    dim3 gridSize((N + blockSize.x - 1) / blockSize.x, (N + blockSize.y - 1) / blockSize.y);
+    matrixMul<<<gridSize, blockSize>>>(deviceA, deviceB, deviceC, N);
+    cudaDeviceSynchronize();
+    cudaMemcpy(hostC, deviceC, bytes, cudaMemcpyDeviceToHost);
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "C[" << i << "]: " << hostC[i] << std::endl;
+    }
+    cudaFree(deviceA);
+    cudaFree(deviceB);
+    cudaFree(deviceC);
+    delete[] hostA;
+    delete[] hostB;
+    delete[] hostC;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 核函数：简单向量加法
+__global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+int main() {
+    const int N = 1 << 20; // 向量大小
+    const int bytes = N * sizeof(float);
+    // 分配主机内存并初始化
+    float *hostA = new float[N];
+    float *hostB = new float[N];
+    float *hostC = new float[N];
+    for (int i = 0; i < N; ++i) {
+        hostA[i] = static_cast<float>(i);
+        hostB[i] = static_cast<float>(2 * i);
+    }
+    // 分配设备内存
+    float *deviceA, *deviceB, *deviceC;
+    cudaMalloc(&deviceA, bytes);
+    cudaMalloc(&deviceB, bytes);
+    cudaMalloc(&deviceC, bytes);
+    // 创建CUDA流
+    cudaStream_t stream1, stream2;
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+    // 异步数据传输到设备
+    cudaMemcpyAsync(deviceA, hostA, bytes, cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(deviceB, hostB, bytes, cudaMemcpyHostToDevice, stream2);
+    // 启动核函数
+    const int blockSize = 256;
+    const int gridSize = (N + blockSize - 1) / blockSize;
+    vectorAdd<<<gridSize, blockSize, 0, stream1>>>(deviceA, deviceB, deviceC, N);
+    // 异步将结果传输回主机
+    cudaMemcpyAsync(hostC, deviceC, bytes, cudaMemcpyDeviceToHost, stream2);
+    // 同步流
+    cudaStreamSynchronize(stream1);
+    cudaStreamSynchronize(stream2);
+    // 打印部分结果
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "C[" << i << "]: " << hostC[i] << std::endl;
+    }
+    // 销毁流
+    cudaStreamDestroy(stream1);
+    cudaStreamDestroy(stream2);
+    // 释放内存
+    cudaFree(deviceA);
+    cudaFree(deviceB);
+    cudaFree(deviceC);
+    delete[] hostA;
+    delete[] hostB;
+    delete[] hostC;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+// 宏函数：通用错误检测
+#define CUDA_CHECK(call)                                                               \
+    {                                                                                  \
+        cudaError_t err = call;                                                        \
+        if (err != cudaSuccess) {                                                      \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "       \
+                      << cudaGetErrorString(err) << std::endl;                         \
+            exit(EXIT_FAILURE);                                                        \
+        }                                                                              \
+    }
+// 核函数：矩阵加法
+__global__ void matrixAdd(const float *a, const float *b, float *c, int rows, int cols) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows && col < cols) {
+        int idx = row * cols + col;
+        c[idx] = a[idx] + b[idx];
+        // 调试输出：每个线程的执行路径
+        printf("Thread (%d, %d) calculated c[%d] = %f\n", row, col, idx, c[idx]);
+    }
+}
+int main() {
+    const int rows = 4, cols = 4; // 示例矩阵大小
+    const int size = rows * cols * sizeof(float);
+    // 主机内存分配
+    float hostA[rows * cols], hostB[rows * cols], hostC[rows * cols];
+    for (int i = 0; i < rows * cols; ++i) {
+        hostA[i] = static_cast<float>(i);
+        hostB[i] = static_cast<float>(i * 2);
+    }
+    // 设备内存分配
+    float *deviceA, *deviceB, *deviceC;
+    CUDA_CHECK(cudaMalloc((void **)&deviceA, size));
+    CUDA_CHECK(cudaMalloc((void **)&deviceB, size));
+    CUDA_CHECK(cudaMalloc((void **)&deviceC, size));
+    // 数据传输到设备
+    CUDA_CHECK(cudaMemcpy(deviceA, hostA, size, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceB, hostB, size, cudaMemcpyHostToDevice));
+    // 设置线程块和网格大小
+    dim3 blockSize(2, 2);
+    dim3 gridSize((cols + blockSize.x - 1) / blockSize.x, (rows + blockSize.y - 1) / blockSize.y);
+    // 启动核函数
+    matrixAdd<<<gridSize, blockSize>>>(deviceA, deviceB, deviceC, rows, cols);
+    // 同步设备
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 数据传输回主机
+    CUDA_CHECK(cudaMemcpy(hostC, deviceC, size, cudaMemcpyDeviceToHost));
+    // 打印结果
+    std::cout << "Matrix C (Result):" << std::endl;
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            std::cout << hostC[i * cols + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    // 释放内存
+    CUDA_CHECK(cudaFree(deviceA));
+    CUDA_CHECK(cudaFree(deviceB));
+    CUDA_CHECK(cudaFree(deviceC));
+    return 0;
+}

@@ -1,0 +1,640 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+// 引入必要的CUDA和标准库头文件
+#include <iostream>
+#include <cuda_runtime.h>
+#include <cmath>
+// 定义常量
+#define NUM_PARTICLES 1024  // 分子数量
+#define BLOCK_SIZE 256     // 每个线程块的线程数
+#define EPSILON 1e-8       // 避免除以零的小常量
+// GPU核函数：计算分子间作用力
+__global__ void computeForces(float3* positions, float3* forces, int numParticles) {
+    // 获取线程索引
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParticles) return;
+    float3 myPosition = positions[idx];
+    float3 force = {0.0f, 0.0f, 0.0f};
+    // 计算与其他分子的作用力
+    for (int j = 0; j < numParticles; ++j) {
+        if (j == idx) continue;
+        float3 otherPosition = positions[j];
+        float dx = myPosition.x - otherPosition.x;
+        float dy = myPosition.y - otherPosition.y;
+        float dz = myPosition.z - otherPosition.z;
+        float distSqr = dx * dx + dy * dy + dz * dz + EPSILON;
+        float distInv = rsqrtf(distSqr);
+        float forceMagnitude = distInv * distInv;  // 假设简单的1/r^2力模型
+        force.x += forceMagnitude * dx * distInv;
+        force.y += forceMagnitude * dy * distInv;
+        force.z += forceMagnitude * dz * distInv;
+    }
+    // 保存计算结果
+    forces[idx] = force;
+}
+// 主函数
+int main() {
+    // 定义主机内存变量
+    float3* h_positions = new float3[NUM_PARTICLES];
+    float3* h_forces = new float3[NUM_PARTICLES];
+    // 初始化分子位置
+    for (int i = 0; i < NUM_PARTICLES; ++i) {
+        h_positions[i].x = static_cast<float>(rand()) / RAND_MAX;
+        h_positions[i].y = static_cast<float>(rand()) / RAND_MAX;
+        h_positions[i].z = static_cast<float>(rand()) / RAND_MAX;
+        h_forces[i] = {0.0f, 0.0f, 0.0f};
+    }
+    // 定义设备内存变量
+    float3* d_positions;
+    float3* d_forces;
+    // 分配设备内存
+    cudaMalloc((void**)&d_positions, NUM_PARTICLES * sizeof(float3));
+    cudaMalloc((void**)&d_forces, NUM_PARTICLES * sizeof(float3));
+    // 将主机数据拷贝到设备
+    cudaMemcpy(d_positions, h_positions, NUM_PARTICLES * sizeof(float3), cudaMemcpyHostToDevice);
+    cudaMemset(d_forces, 0, NUM_PARTICLES * sizeof(float3));
+    // 定义线程块与网格
+    int numBlocks = (NUM_PARTICLES + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    // 启动核函数
+    computeForces<<<numBlocks, BLOCK_SIZE>>>(d_positions, d_forces, NUM_PARTICLES);
+    // 同步设备，确保核函数完成
+    cudaDeviceSynchronize();
+    // 将结果从设备拷贝回主机
+    cudaMemcpy(h_forces, d_forces, NUM_PARTICLES * sizeof(float3), cudaMemcpyDeviceToHost);
+    // 输出部分结果
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "Particle " << i << " Force: "
+                  << h_forces[i].x << ", "
+                  << h_forces[i].y << ", "
+                  << h_forces[i].z << std::endl;
+    }
+    // 释放设备内存
+    cudaFree(d_positions);
+    cudaFree(d_forces);
+    // 释放主机内存
+    delete[] h_positions;
+    delete[] h_forces;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cmath>
+#define N 1024  // 总分子数
+#define BLOCK_SIZE 256  // 每个线程块的线程数
+__global__ void calculateForces(float* positions, float* forces, int numParticles) {
+    __shared__ float sharedPos[BLOCK_SIZE][3];  // 共享内存存储分子位置
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    if (idx >= numParticles) return;
+    // 加载当前分子位置到共享内存
+    sharedPos[tid][0] = positions[idx * 3 + 0];
+    sharedPos[tid][1] = positions[idx * 3 + 1];
+    sharedPos[tid][2] = positions[idx * 3 + 2];
+    __syncthreads();
+    float fx = 0.0f, fy = 0.0f, fz = 0.0f;
+    for (int j = 0; j < blockDim.x; j++) {
+        if (j + blockIdx.x * blockDim.x >= numParticles) continue;
+        float dx = sharedPos[tid][0] - sharedPos[j][0];
+        float dy = sharedPos[tid][1] - sharedPos[j][1];
+        float dz = sharedPos[tid][2] - sharedPos[j][2];
+        float r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 > 0.0001f) {
+            float r6 = r2 * r2 * r2;
+            float force = 24.0f * (2.0f / r6 - 1.0f) / (r6 * r2);
+            fx += force * dx;
+            fy += force * dy;
+            fz += force * dz;
+        }
+    }
+    forces[idx * 3 + 0] = fx;
+    forces[idx * 3 + 1] = fy;
+    forces[idx * 3 + 2] = fz;
+}
+int main() {
+    float* h_positions = new float[N * 3];
+    float* h_forces = new float[N * 3];
+    float* d_positions;
+    float* d_forces;
+    for (int i = 0; i < N * 3; i++) {
+        h_positions[i] = static_cast<float>(rand()) / RAND_MAX;
+    }
+    cudaMalloc(&d_positions, N * 3 * sizeof(float));
+    cudaMalloc(&d_forces, N * 3 * sizeof(float));
+    cudaMemcpy(d_positions, h_positions, N * 3 * sizeof(float), cudaMemcpyHostToDevice);
+    dim3 blockSize(BLOCK_SIZE);
+    dim3 gridSize((N + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    calculateForces<<<gridSize, blockSize>>>(d_positions, d_forces, N);
+    cudaMemcpy(h_forces, d_forces, N * 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "Forces on the first few molecules:" << std::endl;
+    for (int i = 0; i < 10; i++) {
+        std::cout << "Molecule " << i << ": (" << h_forces[i * 3 + 0] << ", "
+                  << h_forces[i * 3 + 1] << ", " << h_forces[i * 3 + 2] << ")" << std::endl;
+    }
+    delete[] h_positions;
+    delete[] h_forces;
+    cudaFree(d_positions);
+    cudaFree(d_forces);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#include <cmath>
+#define BLOCK_SIZE 16  // 定义线程块大小
+// 范德瓦尔斯能量计算核函数
+__global__ void computeEnergyKernel(float *positions, float *energies, int numAtoms) {
+    // 定义共享内存用于存储当前块的数据
+    __shared__ float sharedPosX[BLOCK_SIZE];
+    __shared__ float sharedPosY[BLOCK_SIZE];
+    __shared__ float sharedPosZ[BLOCK_SIZE];
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int globalX = bx * BLOCK_SIZE + tx;
+    int globalY = by * BLOCK_SIZE + ty;
+    if (globalX >= numAtoms || globalY >= numAtoms) return;
+    float energy = 0.0f;
+    // 加载当前线程块的分子数据到共享内存
+    sharedPosX[tx] = positions[globalX * 3];
+    sharedPosY[tx] = positions[globalX * 3 + 1];
+    sharedPosZ[tx] = positions[globalX * 3 + 2];
+    __syncthreads();
+    // 双循环计算范德瓦尔斯能量
+    for (int i = 0; i < BLOCK_SIZE; i++) {
+        float dx = sharedPosX[i] - positions[globalY * 3];
+        float dy = sharedPosY[i] - positions[globalY * 3 + 1];
+        float dz = sharedPosZ[i] - positions[globalY * 3 + 2];
+        float distSquared = dx * dx + dy * dy + dz * dz;
+        float dist = sqrt(distSquared);
+        if (dist > 0) energy += 1.0f / dist;  // 简化的范德瓦尔斯能量公式
+    }
+    // 写入结果
+    atomicAdd(&energies[globalX], energy);
+    __syncthreads();
+}
+// 主程序
+int main() {
+    int numAtoms = 1024;  // 模拟1024个分子
+    size_t dataSize = numAtoms * 3 * sizeof(float);
+    size_t energySize = numAtoms * sizeof(float);
+    // 主机内存分配
+    std::vector<float> h_positions(numAtoms * 3, 1.0f);  // 初始化为1.0
+    std::vector<float> h_energies(numAtoms, 0.0f);
+    // 设备内存分配
+    float *d_positions, *d_energies;
+    cudaMalloc((void **)&d_positions, dataSize);
+    cudaMalloc((void **)&d_energies, energySize);
+    // 数据拷贝到设备
+    cudaMemcpy(d_positions, h_positions.data(), dataSize, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_energies, h_energies.data(), energySize, cudaMemcpyHostToDevice);
+    // 定义线程块和网格尺寸
+    dim3 blockSize(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 gridSize((numAtoms + BLOCK_SIZE - 1) / BLOCK_SIZE, (numAtoms + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    // 调用核函数
+    computeEnergyKernel<<<gridSize, blockSize>>>(d_positions, d_energies, numAtoms);
+    // 同步设备
+    cudaDeviceSynchronize();
+    // 拷贝结果回主机
+    cudaMemcpy(h_energies.data(), d_energies, energySize, cudaMemcpyDeviceToHost);
+    // 打印部分结果
+    for (int i = 0; i < 10; i++) {
+        std::cout << "Energy[" << i << "] = " << h_energies[i] << std::endl;
+    }
+    // 释放设备内存
+    cudaFree(d_positions);
+    cudaFree(d_energies);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#include <cmath>
+#define BLOCK_SIZE 16  // 定义线程块大小
+// 力矩计算核函数
+__global__ void computeTorqueKernel(float *positions, float *forces, float *torques, int numAtoms) {
+    // 定义共享内存用于存储当前块的位置和力
+    __shared__ float sharedPosX[BLOCK_SIZE];
+    __shared__ float sharedPosY[BLOCK_SIZE];
+    __shared__ float sharedPosZ[BLOCK_SIZE];
+    __shared__ float sharedForceX[BLOCK_SIZE];
+    __shared__ float sharedForceY[BLOCK_SIZE];
+    __shared__ float sharedForceZ[BLOCK_SIZE];
+    int tx = threadIdx.x;
+    int bx = blockIdx.x;
+    int idx = bx * BLOCK_SIZE + tx;
+    if (idx >= numAtoms) return;
+    // 加载数据到共享内存
+    sharedPosX[tx] = positions[idx * 3];
+    sharedPosY[tx] = positions[idx * 3 + 1];
+    sharedPosZ[tx] = positions[idx * 3 + 2];
+    sharedForceX[tx] = forces[idx * 3];
+    sharedForceY[tx] = forces[idx * 3 + 1];
+    sharedForceZ[tx] = forces[idx * 3 + 2];
+    __syncthreads();
+    // 计算力矩
+    float torqueX = 0.0f, torqueY = 0.0f, torqueZ = 0.0f;
+    for (int i = 0; i < BLOCK_SIZE; i++) {
+        float dx = sharedPosY[tx] * sharedForceZ[i] - sharedPosZ[tx] * sharedForceY[i];
+        float dy = sharedPosZ[tx] * sharedForceX[i] - sharedPosX[tx] * sharedForceZ[i];
+        float dz = sharedPosX[tx] * sharedForceY[i] - sharedPosY[tx] * sharedForceX[i];
+        torqueX += dx;
+        torqueY += dy;
+        torqueZ += dz;
+    }
+    // 写回全局内存
+    torques[idx * 3] = torqueX;
+    torques[idx * 3 + 1] = torqueY;
+    torques[idx * 3 + 2] = torqueZ;
+}
+// 主程序
+int main() {
+    int numAtoms = 1024;  // 模拟1024个分子
+    size_t dataSize = numAtoms * 3 * sizeof(float);
+    // 主机内存分配
+    std::vector<float> h_positions(numAtoms * 3, 1.0f);  // 初始化位置为1.0
+    std::vector<float> h_forces(numAtoms * 3, 0.5f);     // 初始化力为0.5
+    std::vector<float> h_torques(numAtoms * 3, 0.0f);    // 初始化力矩为0.0
+    // 设备内存分配
+    float *d_positions, *d_forces, *d_torques;
+    cudaMalloc((void **)&d_positions, dataSize);
+    cudaMalloc((void **)&d_forces, dataSize);
+    cudaMalloc((void **)&d_torques, dataSize);
+    // 数据拷贝到设备
+    cudaMemcpy(d_positions, h_positions.data(), dataSize, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_forces, h_forces.data(), dataSize, cudaMemcpyHostToDevice);
+    // 定义线程块和网格尺寸
+    dim3 blockSize(BLOCK_SIZE);
+    dim3 gridSize((numAtoms + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    // 调用核函数
+    computeTorqueKernel<<<gridSize, blockSize>>>(d_positions, d_forces, d_torques, numAtoms);
+    // 同步设备
+    cudaDeviceSynchronize();
+    // 拷贝结果回主机
+    cudaMemcpy(h_torques.data(), d_torques, dataSize, cudaMemcpyDeviceToHost);
+    // 打印部分结果
+    for (int i = 0; i < 10; i++) {
+        std::cout << "Torque[" << i << "] = (" << h_torques[i * 3] << ", " << h_torques[i * 3 + 1] << ", " << h_torques[i * 3 + 2] << ")" << std::endl;
+    }
+    // 释放设备内存
+    cudaFree(d_positions);
+    cudaFree(d_forces);
+    cudaFree(d_torques);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <random>
+// 常量定义
+const double sigma = 1.0;
+const double epsilon = 1.0;
+const double mass = 1.0;
+const double timeStep = 0.001;
+const int numParticles = 1000;
+const int numSteps = 1000;
+// 计算Lennard-Jones势能和作用力
+double computeLJPotential(double r) {
+    double sr = sigma / r;
+    double sr6 = std::pow(sr, 6);
+    double sr12 = sr6 * sr6;
+    return 4 * epsilon * (sr12 - sr6);
+}
+double computeLJForce(double r) {
+    double sr = sigma / r;
+    double sr6 = std::pow(sr, 6);
+    double sr12 = sr6 * sr6;
+    return 24 * epsilon / r * (2 * sr12 - sr6);
+}
+// 初始化分子位置和速度
+void initializeParticles(std::vector<std::vector<double>> &positions,
+                         std::vector<std::vector<double>> &velocities) {
+    std::default_random_engine generator;
+    std::uniform_real_distribution<double> distribution(0.0, 10.0);
+    for (int i = 0; i < numParticles; ++i) {
+        positions[i][0] = distribution(generator);
+        positions[i][1] = distribution(generator);
+        positions[i][2] = distribution(generator);
+        velocities[i][0] = distribution(generator) - 5.0;
+        velocities[i][1] = distribution(generator) - 5.0;
+        velocities[i][2] = distribution(generator) - 5.0;
+    }
+}
+// 计算总能量
+double computeTotalEnergy(const std::vector<std::vector<double>> &positions,
+                          const std::vector<std::vector<double>> &velocities) {
+    double totalPotential = 0.0;
+    double totalKinetic = 0.0;
+    // 计算势能
+    for (int i = 0; i < numParticles; ++i) {
+        for (int j = i + 1; j < numParticles; ++j) {
+            double dx = positions[i][0] - positions[j][0];
+            double dy = positions[i][1] - positions[j][1];
+            double dz = positions[i][2] - positions[j][2];
+            double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (r > 0.1) {
+                totalPotential += computeLJPotential(r);
+            }
+        }
+    }
+    // 计算动能
+    for (int i = 0; i < numParticles; ++i) {
+        double v2 = velocities[i][0] * velocities[i][0] +
+                    velocities[i][1] * velocities[i][1] +
+                    velocities[i][2] * velocities[i][2];
+        totalKinetic += 0.5 * mass * v2;
+    }
+    return totalPotential + totalKinetic;
+}
+int main() {
+    std::vector<std::vector<double>> positions(numParticles, std::vector<double>(3));
+    std::vector<std::vector<double>> velocities(numParticles, std::vector<double>(3));
+    initializeParticles(positions, velocities);
+    for (int step = 0; step < numSteps; ++step) {
+        double totalEnergy = computeTotalEnergy(positions, velocities);
+        std::cout << "Step " << step << ", Total Energy: " << totalEnergy << std::endl;
+        // 简化的时间积分
+        for (int i = 0; i < numParticles; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                positions[i][j] += velocities[i][j] * timeStep;
+            }
+        }
+    }
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <iostream>
+#include <cuda_runtime.h>
+#include <nvToolsExt.h>
+#include <vector>
+// 定义常量
+const int numParticles = 1000;
+const int blockSize = 256;
+// CUDA核函数，用于计算作用力
+__global__ void computeForces(const double* positions, double* forces, int numParticles) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numParticles) {
+        double force = 0.0;
+        for (int j = 0; j < numParticles; ++j) {
+            if (j != idx) {
+                double dx = positions[idx * 3] - positions[j * 3];
+                double dy = positions[idx * 3 + 1] - positions[j * 3 + 1];
+                double dz = positions[idx * 3 + 2] - positions[j * 3 + 2];
+                double dist = sqrt(dx * dx + dy * dy + dz * dz);
+                if (dist > 0.1) {
+                    force += 24 * ((2 / pow(dist, 13)) - (1 / pow(dist, 7)));
+                }
+            }
+        }
+        forces[idx] = force;
+    }
+}
+int main() {
+    // 初始化数据
+    std::vector<double> h_positions(numParticles * 3);
+    std::vector<double> h_forces(numParticles);
+    for (int i = 0; i < numParticles; ++i) {
+        h_positions[i * 3] = rand() / double(RAND_MAX);
+        h_positions[i * 3 + 1] = rand() / double(RAND_MAX);
+        h_positions[i * 3 + 2] = rand() / double(RAND_MAX);
+    }
+    // 分配设备内存
+    double* d_positions;
+    double* d_forces;
+    cudaMalloc(&d_positions, numParticles * 3 * sizeof(double));
+    cudaMalloc(&d_forces, numParticles * sizeof(double));
+    // 将数据从主机复制到设备
+    cudaMemcpy(d_positions, h_positions.data(), numParticles * 3 * sizeof(double), cudaMemcpyHostToDevice);
+    // 设置性能标记
+    nvtxRangePush("Force Computation");
+    // 计算作用力
+    int numBlocks = (numParticles + blockSize - 1) / blockSize;
+    computeForces<<<numBlocks, blockSize>>>(d_positions, d_forces, numParticles);
+    cudaDeviceSynchronize();
+    // 结束性能标记
+    nvtxRangePop();
+    // 将结果从设备复制到主机
+    cudaMemcpy(h_forces.data(), d_forces, numParticles * sizeof(double), cudaMemcpyDeviceToHost);
+    // 打印部分结果
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "Force[" << i << "] = " << h_forces[i] << std::endl;
+    }
+    // 清理资源
+    cudaFree(d_positions);
+    cudaFree(d_forces);
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#include <cstdlib>
+#include <cmath>
+// GPU内核函数：计算分子间作用力
+__global__ void computeForces(float *positions, float *forces, int numParticles, float cutoff) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numParticles) {
+        float fx = 0.0f, fy = 0.0f, fz = 0.0f;
+        float xi = positions[idx * 3];
+        float yi = positions[idx * 3 + 1];
+        float zi = positions[idx * 3 + 2];
+        for (int j = 0; j < numParticles; j++) {
+            if (j == idx) continue;
+            float xj = positions[j * 3];
+            float yj = positions[j * 3 + 1];
+            float zj = positions[j * 3 + 2];
+            float dx = xj - xi;
+            float dy = yj - yi;
+            float dz = zj - zi;
+            float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < cutoff * cutoff) {
+                float dist = sqrtf(distSq);
+                float force = (1.0f / (dist * dist + 1e-6f));  // 示例力计算
+                fx += force * dx / dist;
+                fy += force * dy / dist;
+                fz += force * dz / dist;
+            }
+        }
+        forces[idx * 3] = fx;
+        forces[idx * 3 + 1] = fy;
+        forces[idx * 3 + 2] = fz;
+    }
+}
+// 主机代码：多GPU并行实现
+int main() {
+    const int numParticles = 10000;  // 模拟粒子数量
+    const int numGPUs = 2;          // 使用的GPU数量
+    const float cutoff = 1.0f;      // 截断距离
+    const int blockSize = 256;      // 每个块的线程数
+    // 初始化CUDA设备
+    cudaSetDevice(0);
+    int deviceCount;
+    cudaGetDeviceCount(&deviceCount);
+    if (deviceCount < numGPUs) {
+        std::cerr << "Error: Insufficient GPUs available." << std::endl;
+        return -1;
+    }
+    // 分配多GPU的粒子数据
+    int particlesPerGPU = numParticles / numGPUs;
+    std::vector<float *> d_positions(numGPUs), d_forces(numGPUs);
+    std::vector<float *> h_positions(numGPUs), h_forces(numGPUs);
+    for (int i = 0; i < numGPUs; i++) {
+        cudaSetDevice(i);
+        cudaMalloc(&d_positions[i], particlesPerGPU * 3 * sizeof(float));
+        cudaMalloc(&d_forces[i], particlesPerGPU * 3 * sizeof(float));
+        h_positions[i] = (float *)malloc(particlesPerGPU * 3 * sizeof(float));
+        h_forces[i] = (float *)malloc(particlesPerGPU * 3 * sizeof(float));
+        // 初始化粒子数据
+        for (int j = 0; j < particlesPerGPU * 3; j++) {
+            h_positions[i][j] = static_cast<float>(rand()) / RAND_MAX;
+        }
+        cudaMemcpy(d_positions[i], h_positions[i], particlesPerGPU * 3 * sizeof(float), cudaMemcpyHostToDevice);
+    }
+    // 执行多GPU计算
+    for (int i = 0; i < numGPUs; i++) {
+        cudaSetDevice(i);
+        int gridSize = (particlesPerGPU + blockSize - 1) / blockSize;
+        computeForces<<<gridSize, blockSize>>>(d_positions[i], d_forces[i], particlesPerGPU, cutoff);
+    }
+    // 同步并拷回结果
+    for (int i = 0; i < numGPUs; i++) {
+        cudaSetDevice(i);
+        cudaMemcpy(h_forces[i], d_forces[i], particlesPerGPU * 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    }
+    // 输出部分结果
+    for (int i = 0; i < 10; i++) {
+        std::cout << "Particle " << i << ": Force = (" 
+                  << h_forces[0][i * 3] << ", " 
+                  << h_forces[0][i * 3 + 1] << ", " 
+                  << h_forces[0][i * 3 + 2] << ")" << std::endl;
+    }
+    // 清理资源
+    for (int i = 0; i < numGPUs; i++) {
+        cudaSetDevice(i);
+        cudaFree(d_positions[i]);
+        cudaFree(d_forces[i]);
+        free(h_positions[i]);
+        free(h_forces[i]);
+    }
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <mpi.h>
+#include <iostream>
+#include <vector>
+#include <cmath>
+// GPU内核函数：计算分子间作用力
+__global__ void computeForces(float *positions, float *forces, int numParticles, float cutoff) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numParticles) {
+        float fx = 0.0f, fy = 0.0f, fz = 0.0f;
+        float xi = positions[idx * 3];
+        float yi = positions[idx * 3 + 1];
+        float zi = positions[idx * 3 + 2];
+        for (int j = 0; j < numParticles; j++) {
+            if (j == idx) continue;
+            float xj = positions[j * 3];
+            float yj = positions[j * 3 + 1];
+            float zj = positions[j * 3 + 2];
+            float dx = xj - xi;
+            float dy = yj - yi;
+            float dz = zj - zi;
+            float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < cutoff * cutoff) {
+                float dist = sqrtf(distSq);
+                float force = (1.0f / (dist * dist + 1e-6f));
+                fx += force * dx / dist;
+                fy += force * dy / dist;
+                fz += force * dz / dist;
+            }
+        }
+        forces[idx * 3] = fx;
+        forces[idx * 3 + 1] = fy;
+        forces[idx * 3 + 2] = fz;
+    }
+}
+// 主机代码：多GPU协同计算与性能验证
+int main(int argc, char **argv) {
+    MPI_Init(&argc, &argv);
+    int worldSize, worldRank;
+    MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
+    MPI_Comm_rank(MPI_COMM_WORLD, &worldRank);
+    const int numParticles = 10000;  // 模拟粒子总数
+    const int blockSize = 256;       // 每个块的线程数
+    const float cutoff = 1.0f;       // 截断距离
+    int particlesPerGPU = numParticles / worldSize;
+    float *d_positions, *d_forces;
+    float *h_positions = (float *)malloc(particlesPerGPU * 3 * sizeof(float));
+    float *h_forces = (float *)malloc(particlesPerGPU * 3 * sizeof(float));
+    // 初始化粒子数据
+    for (int i = 0; i < particlesPerGPU * 3; i++) {
+        h_positions[i] = static_cast<float>(rand()) / RAND_MAX;
+    }
+    // 设置GPU并分配内存
+    cudaSetDevice(worldRank);
+    cudaMalloc(&d_positions, particlesPerGPU * 3 * sizeof(float));
+    cudaMalloc(&d_forces, particlesPerGPU * 3 * sizeof(float));
+    cudaMemcpy(d_positions, h_positions, particlesPerGPU * 3 * sizeof(float), cudaMemcpyHostToDevice);
+    // 计算分子间作用力
+    int gridSize = (particlesPerGPU + blockSize - 1) / blockSize;
+    computeForces<<<gridSize, blockSize>>>(d_positions, d_forces, particlesPerGPU, cutoff);
+    // 同步数据到主机并通过MPI通信合并结果
+    cudaMemcpy(h_forces, d_forces, particlesPerGPU * 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    float *globalForces = nullptr;
+    if (worldRank == 0) {
+        globalForces = (float *)malloc(numParticles * 3 * sizeof(float));
+    }
+    MPI_Gather(h_forces, particlesPerGPU * 3, MPI_FLOAT, globalForces, particlesPerGPU * 3, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    // 输出结果与验证
+    if (worldRank == 0) {
+        for (int i = 0; i < 10; i++) {
+            std::cout << "Particle " << i << ": Force = (" 
+                      << globalForces[i * 3] << ", " 
+                      << globalForces[i * 3 + 1] << ", " 
+                      << globalForces[i * 3 + 2] << ")" << std::endl;
+        }
+        free(globalForces);
+    }
+    // 清理资源
+    cudaFree(d_positions);
+    cudaFree(d_forces);
+    free(h_positions);
+    free(h_forces);
+    MPI_Finalize();
+    return 0;
+}
+

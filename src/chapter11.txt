@@ -1,0 +1,544 @@
+------------------------------------------------------------------------------------------------------------------
+
+
+import numpy as np
+from numba import cuda
+# 定义矩阵分块大小
+BLOCK_SIZE = 256
+# 矩阵乘法核函数
+@cuda.jit
+def matrix_multiply_kernel(A, B, C, N):
+    row = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
+    col = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
+    if row < N and col < N:
+        sum = 0
+        for k in range(N):
+            sum += A[row, k] * B[k, col]
+        C[row, col] = sum
+# 多GPU矩阵分块乘法
+def multi_gpu_matrix_multiply(A, B, C, N, num_gpus):
+    # 划分矩阵为子块
+    sub_size = N // num_gpus
+    streams = []
+    devices = []
+    
+    for i in range(num_gpus):
+        cuda.select_device(i)
+        streams.append(cuda.stream())
+        devices.append(cuda.current_context())
+    d_A = [cuda.to_device(A[i * sub_size:(i + 1) * sub_size, :], stream=streams[i]) for i in range(num_gpus)]
+    d_B = [cuda.to_device(B, stream=streams[i]) for i in range(num_gpus)]
+    d_C = [cuda.device_array((sub_size, N), dtype=np.float32, stream=streams[i]) for i in range(num_gpus)]
+    # 启动内核
+    for i in range(num_gpus):
+        threads_per_block = (16, 16)
+        blocks_per_grid = (N // threads_per_block[0], sub_size // threads_per_block[1])
+        with streams[i]:
+            matrix_multiply_kernel[blocks_per_grid, threads_per_block, streams[i]](d_A[i], d_B[i], d_C[i], N)
+    # 将结果复制回主机
+    for i in range(num_gpus):
+        d_C[i].copy_to_host(C[i * sub_size:(i + 1) * sub_size, :], stream=streams[i])
+    # 同步流
+    for i in range(num_gpus):
+        streams[i].synchronize()
+# 测试代码
+N = 1024  # 矩阵大小
+num_gpus = 2  # 使用的GPU数量
+A = np.random.rand(N, N).astype(np.float32)
+B = np.random.rand(N, N).astype(np.float32)
+C = np.zeros((N, N), dtype=np.float32)
+multi_gpu_matrix_multiply(A, B, C, N, num_gpus)
+# 验证结果
+C_ref = np.dot(A, B)
+if np.allclose(C, C_ref):
+    print("矩阵乘法结果正确")
+else:
+    print("矩阵乘法结果错误")
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+from mpi4py import MPI
+import numpy as np
+from numba import cuda
+# MPI初始化
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+# CUDA核函数：矩阵加法
+@cuda.jit
+def matrix_add_kernel(A, B, C):
+    row, col = cuda.grid(2)
+    if row < C.shape[0] and col < C.shape[1]:
+        C[row, col] = A[row, col] + B[row, col]
+# 矩阵分块和计算函数
+def gpu_matrix_addition(local_A, local_B):
+    threads_per_block = (16, 16)
+    blocks_per_grid_x = (local_A.shape[1] + threads_per_block[0] - 1) // threads_per_block[0]
+    blocks_per_grid_y = (local_A.shape[0] + threads_per_block[1] - 1) // threads_per_block[1]
+    blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
+    d_A = cuda.to_device(local_A)
+    d_B = cuda.to_device(local_B)
+    d_C = cuda.device_array_like(local_A)
+    matrix_add_kernel[blocks_per_grid, threads_per_block](d_A, d_B, d_C)
+    cuda.synchronize()
+    return d_C.copy_to_host()
+# 主逻辑
+def main():
+    # 矩阵大小
+    N = 1024
+    M = 1024
+    # 每个进程的矩阵分块大小
+    local_rows = N // size
+    # 进程0初始化全局矩阵并分发
+    if rank == 0:
+        A = np.random.rand(N, M).astype(np.float32)
+        B = np.random.rand(N, M).astype(np.float32)
+    else:
+        A = None
+        B = None
+    # 分配本地矩阵块
+    local_A = np.empty((local_rows, M), dtype=np.float32)
+    local_B = np.empty((local_rows, M), dtype=np.float32)
+    comm.Scatter(A, local_A, root=0)
+    comm.Scatter(B, local_B, root=0)
+    # GPU计算本地块
+    local_C = gpu_matrix_addition(local_A, local_B)
+    # 收集所有块到进程0
+    if rank == 0:
+        C = np.empty((N, M), dtype=np.float32)
+    else:
+        C = None
+    comm.Gather(local_C, C, root=0)
+    # 进程0验证结果
+    if rank == 0:
+        C_ref = A + B
+        if np.allclose(C, C_ref):
+            print("矩阵加法结果正确")
+        else:
+            print("矩阵加法结果错误")
+if __name__ == "__main__":
+    main()
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+import numpy as np
+import cupy as cp
+import time
+# 定义向量大小
+vector_size = 10**7
+cpu_chunk_size = vector_size // 10  # 10%的任务分配给CPU
+# 初始化数据
+vector_a = np.random.rand(vector_size)
+vector_b = np.random.rand(vector_size)
+weights = np.random.rand(vector_size)
+# CPU加权求和函数
+def cpu_weighted_sum(a, b, w):
+    result = np.zeros_like(a)
+    for i in range(len(a)):
+        result[i] = a[i] * w[i] + b[i] * (1 - w[i])
+    return result
+# GPU加权求和核函数
+gpu_weighted_sum_kernel = cp.ElementwiseKernel(
+    "float32 a, float32 b, float32 w",  # 输入参数
+    "float32 result",                   # 输出参数
+    "result = a * w + b * (1 - w)",     # 核函数逻辑
+    "gpu_weighted_sum_kernel"
+)
+# 数据划分
+cpu_a = vector_a[:cpu_chunk_size]
+cpu_b = vector_b[:cpu_chunk_size]
+cpu_w = weights[:cpu_chunk_size]
+gpu_a = cp.array(vector_a[cpu_chunk_size:])
+gpu_b = cp.array(vector_b[cpu_chunk_size:])
+gpu_w = cp.array(weights[cpu_chunk_size:])
+# CPU计算
+start_cpu = time.time()
+cpu_result = cpu_weighted_sum(cpu_a, cpu_b, cpu_w)
+end_cpu = time.time()
+# GPU计算
+start_gpu = time.time()
+gpu_result = gpu_weighted_sum_kernel(gpu_a, gpu_b, gpu_w)
+end_gpu = time.time()
+# 合并结果
+final_result = np.concatenate([cpu_result, cp.asnumpy(gpu_result)])
+# 性能对比输出
+print(f"CPU计算时间: {end_cpu - start_cpu:.6f} 秒")
+print(f"GPU计算时间: {end_gpu - start_gpu:.6f} 秒")
+print(f"总任务结果前10项: {final_result[:10]}")
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+import numpy as np
+import cupy as cp
+import threading
+import time
+# 初始化数据
+matrix_size = (10000, 10000)
+cpu_chunk_size = 2000  # 分配给CPU的矩阵块大小
+matrix_a = np.random.rand(*matrix_size)
+matrix_b = np.random.rand(*matrix_size)
+weights = np.random.rand(*matrix_size)
+# CPU计算函数
+def cpu_compute(a, b, w, result):
+    for i in range(a.shape[0]):
+        result[i, :] = a[i, :] * w[i, :] + b[i, :] * (1 - w[i, :])
+# GPU计算核函数
+gpu_kernel = cp.ElementwiseKernel(
+    "float32 a, float32 b, float32 w",
+    "float32 result",
+    "result = a * w + b * (1 - w)",
+    "gpu_compute"
+)
+# 数据划分
+cpu_a = matrix_a[:cpu_chunk_size, :]
+cpu_b = matrix_b[:cpu_chunk_size, :]
+cpu_w = weights[:cpu_chunk_size, :]
+gpu_a = cp.array(matrix_a[cpu_chunk_size:, :])
+gpu_b = cp.array(matrix_b[cpu_chunk_size:, :])
+gpu_w = cp.array(weights[cpu_chunk_size:, :])
+# 结果存储
+cpu_result = np.zeros((cpu_chunk_size, matrix_size[1]))
+gpu_result = cp.zeros((matrix_size[0] - cpu_chunk_size, matrix_size[1]))
+# 开始计时
+start_time = time.time()
+# CPU线程
+cpu_thread = threading.Thread(target=cpu_compute, args=(cpu_a, cpu_b, cpu_w, cpu_result))
+cpu_thread.start()
+# GPU计算
+gpu_result = gpu_kernel(gpu_a, gpu_b, gpu_w)
+# 等待CPU线程完成
+cpu_thread.join()
+# 合并结果
+final_result = np.vstack([cpu_result, cp.asnumpy(gpu_result)])
+# 结束计时
+end_time = time.time()
+# 输出结果和性能信息
+print(f"总计算时间: {end_time - start_time:.6f} 秒")
+print(f"结果矩阵前5行:\n{final_result[:5, :5]}")
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+// mpi_cuda_matrix.cu
+#include <mpi.h>
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cstdlib>
+#define N 1024 // 矩阵维度
+// CUDA 核函数：矩阵相乘
+__global__ void matrixMultiplyKernel(float *A, float *B, float *C, int size) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < size && col < size) {
+        float value = 0;
+        for (int k = 0; k < size; k++) {
+            value += A[row * size + k] * B[k * size + col];
+        }
+        C[row * size + col] = value;
+    }
+}
+// 初始化矩阵
+void initializeMatrix(float *matrix, int size) {
+    for (int i = 0; i < size * size; i++) {
+        matrix[i] = static_cast<float>(rand()) / RAND_MAX;
+    }
+}
+int main(int argc, char **argv) {
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    int blockSize = N / size; // 每个节点处理的矩阵行数
+    float *A, *B, *C;
+    float *A_block, *C_block;
+    // 主节点初始化矩阵
+    if (rank == 0) {
+        A = (float *)malloc(N * N * sizeof(float));
+        B = (float *)malloc(N * N * sizeof(float));
+        C = (float *)malloc(N * N * sizeof(float));
+        initializeMatrix(A, N);
+        initializeMatrix(B, N);
+    }
+    // 分配子矩阵
+    A_block = (float *)malloc(blockSize * N * sizeof(float));
+    C_block = (float *)malloc(blockSize * N * sizeof(float));
+    float *d_A, *d_B, *d_C;
+    cudaMalloc((void **)&d_A, blockSize * N * sizeof(float));
+    cudaMalloc((void **)&d_B, N * N * sizeof(float));
+    cudaMalloc((void **)&d_C, blockSize * N * sizeof(float));
+    // 广播矩阵 B 给所有节点
+    if (rank == 0) {
+        MPI_Bcast(B, N * N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    } else {
+        B = (float *)malloc(N * N * sizeof(float));
+        MPI_Bcast(B, N * N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    }
+    // 分发矩阵 A 的分块到各节点
+    MPI_Scatter(A, blockSize * N, MPI_FLOAT, A_block, blockSize * N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    // 将数据复制到 GPU
+    cudaMemcpy(d_A, A_block, blockSize * N * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, B, N * N * sizeof(float), cudaMemcpyHostToDevice);
+    // 配置 CUDA 核函数
+    dim3 threadsPerBlock(16, 16);
+    dim3 blocksPerGrid((N + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                       (blockSize + threadsPerBlock.y - 1) / threadsPerBlock.y);
+    // 执行矩阵相乘
+    matrixMultiplyKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
+    // 将结果从 GPU 复制到主机内存
+    cudaMemcpy(C_block, d_C, blockSize * N * sizeof(float), cudaMemcpyDeviceToHost);
+    // 收集计算结果到主节点
+    MPI_Gather(C_block, blockSize * N, MPI_FLOAT, C, blockSize * N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    // 主节点打印结果
+    if (rank == 0) {
+        std::cout << "矩阵 C 的部分数据：" << std::endl;
+        for (int i = 0; i < 10; i++) {
+            std::cout << C[i] << " ";
+        }
+        std::cout << std::endl;
+        free(A);
+        free(B);
+        free(C);
+    }
+    free(A_block);
+    free(C_block);
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    MPI_Finalize();
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <mpi.h>
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#include <cstdlib>
+#include <cmath>
+// 矩阵维度
+#define N 1024
+// CUDA 错误检查宏
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            std::cerr << "CUDA Error: " << cudaGetErrorString(err) << std::endl; \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+// 初始化矩阵
+void initializeMatrix(float *matrix, int rows, int cols) {
+    for (int i = 0; i < rows * cols; ++i) {
+        matrix[i] = static_cast<float>(rand()) / RAND_MAX;
+    }
+}
+// CUDA 核函数：转置矩阵
+__global__ void transposeKernel(float *input, float *output, int rows, int cols) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows && col < cols) {
+        output[col * rows + row] = input[row * cols + col];
+    }
+}
+// 转置矩阵
+void transposeMatrix(float *d_input, float *d_output, int rows, int cols) {
+    dim3 threadsPerBlock(16, 16);
+    dim3 blocksPerGrid((cols + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                       (rows + threadsPerBlock.y - 1) / threadsPerBlock.y);
+    transposeKernel<<<blocksPerGrid, threadsPerBlock>>>(d_input, d_output, rows, cols);
+}
+// 主程序
+int main(int argc, char **argv) {
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    int blockSize = N / size; // 每个节点的分块行数
+    float *A, *A_block, *A_block_T;
+    float *d_A_block, *d_A_block_T;
+    // 主节点初始化矩阵
+    if (rank == 0) {
+        A = (float *)malloc(N * N * sizeof(float));
+        initializeMatrix(A, N, N);
+    }
+    // 分配分块
+    A_block = (float *)malloc(blockSize * N * sizeof(float));
+    A_block_T = (float *)malloc(blockSize * N * sizeof(float));
+    CUDA_CHECK(cudaMalloc((void **)&d_A_block, blockSize * N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **)&d_A_block_T, blockSize * N * sizeof(float)));
+    // 分发矩阵 A 的分块
+    MPI_Scatter(A, blockSize * N, MPI_FLOAT, A_block, blockSize * N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    // 将分块数据复制到 GPU
+    CUDA_CHECK(cudaMemcpy(d_A_block, A_block, blockSize * N * sizeof(float), cudaMemcpyHostToDevice));
+    // 执行矩阵转置
+    transposeMatrix(d_A_block, d_A_block_T, blockSize, N);
+    // 将结果从 GPU 复制到主机内存
+    CUDA_CHECK(cudaMemcpy(A_block_T, d_A_block_T, blockSize * N * sizeof(float), cudaMemcpyDeviceToHost));
+    // 收集转置后的结果
+    MPI_Gather(A_block_T, blockSize * N, MPI_FLOAT, A, blockSize * N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    // 主节点打印部分结果
+    if (rank == 0) {
+        std::cout << "广义逆矩阵部分数据：" << std::endl;
+        for (int i = 0; i < 10; ++i) {
+            std::cout << A[i] << " ";
+        }
+        std::cout << std::endl;
+        free(A);
+    }
+    free(A_block);
+    free(A_block_T);
+    CUDA_CHECK(cudaFree(d_A_block));
+    CUDA_CHECK(cudaFree(d_A_block_T));
+    MPI_Finalize();
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#include <algorithm>
+#include <chrono>
+// 核函数模拟不同计算任务
+__global__ void computeTask(int task_id, int *output, int workload) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < workload) {
+        output[idx] = task_id * idx; // 模拟计算任务
+    }
+}
+// 动态分配任务并调度到不同GPU
+void dynamicTaskAllocation(const std::vector<int>& workloads, int num_gpus) {
+    int *device_outputs[16]; // 假设最多支持16个GPU
+    cudaStream_t streams[16];
+    
+    // 初始化设备和流
+    for (int i = 0; i < num_gpus; ++i) {
+        cudaSetDevice(i);
+        cudaMalloc(&device_outputs[i], workloads[i] * sizeof(int));
+        cudaStreamCreate(&streams[i]);
+    }
+    
+    // 动态分配任务
+    for (int i = 0; i < workloads.size(); ++i) {
+        int device_id = i % num_gpus;
+        cudaSetDevice(device_id);
+        computeTask<<<(workloads[i] + 255) / 256, 256, 0, streams[device_id]>>>(i, device_outputs[device_id], workloads[i]);
+    }
+    // 同步设备
+    for (int i = 0; i < num_gpus; ++i) {
+        cudaSetDevice(i);
+        cudaDeviceSynchronize();
+    }
+    // 释放资源
+    for (int i = 0; i < num_gpus; ++i) {
+        cudaSetDevice(i);
+        cudaFree(device_outputs[i]);
+        cudaStreamDestroy(streams[i]);
+    }
+}
+int main() {
+    int num_gpus;
+    cudaGetDeviceCount(&num_gpus);
+    std::cout << "Detected " << num_gpus << " GPUs." << std::endl;
+    std::vector<int> workloads = {1000, 2000, 3000, 1500, 2500}; // 模拟不同任务的计算量
+    std::cout << "Starting dynamic task allocation..." << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
+    dynamicTaskAllocation(workloads, num_gpus);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::cout << "Task allocation and execution completed in "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()
+              << " ms." << std::endl;
+    return 0;
+}
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#include <chrono>
+// 核函数模拟不同任务
+__global__ void computeTask(int *data, int size, int factor) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < size) {
+        data[idx] = data[idx] * factor;
+    }
+}
+void resourceSchedulingOptimization(int *h_data, int size, int num_tasks, int num_streams) {
+    int *d_data;
+    cudaStream_t *streams = new cudaStream_t[num_streams];
+    cudaEvent_t start, stop;
+    // 分配设备内存
+    cudaMalloc(&d_data, size * sizeof(int));
+    cudaMemcpy(d_data, h_data, size * sizeof(int), cudaMemcpyHostToDevice);
+    // 创建流和事件
+    for (int i = 0; i < num_streams; ++i) {
+        cudaStreamCreate(&streams[i]);
+    }
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    // 记录开始时间
+    cudaEventRecord(start, 0);
+    // 动态分配任务到流
+    int chunk_size = size / num_tasks;
+    for (int i = 0; i < num_tasks; ++i) {
+        int offset = i * chunk_size;
+        int current_size = (i == num_tasks - 1) ? size - offset : chunk_size;
+        computeTask<<<(current_size + 255) / 256, 256, 0, streams[i % num_streams]>>>(d_data + offset, current_size, i + 1);
+    }
+    // 同步所有流
+    for (int i = 0; i < num_streams; ++i) {
+        cudaStreamSynchronize(streams[i]);
+    }
+    // 记录结束时间
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    // 计算耗时
+    float elapsed_time;
+    cudaEventElapsedTime(&elapsed_time, start, stop);
+    std::cout << "Elapsed time: " << elapsed_time << " ms" << std::endl;
+    // 拷回结果
+    cudaMemcpy(h_data, d_data, size * sizeof(int), cudaMemcpyDeviceToHost);
+    // 释放资源
+    for (int i = 0; i < num_streams; ++i) {
+        cudaStreamDestroy(streams[i]);
+    }
+    cudaFree(d_data);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    delete[] streams;
+}
+int main() {
+    const int size = 1000000;
+    const int num_tasks = 10;
+    const int num_streams = 4;
+    int *h_data = new int[size];
+    for (int i = 0; i < size; ++i) {
+        h_data[i] = i % 100;
+    }
+    auto start = std::chrono::high_resolution_clock::now();
+    resourceSchedulingOptimization(h_data, size, num_tasks, num_streams);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::cout << "Total execution time: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()
+              << " ms" << std::endl;
+    delete[] h_data;
+    return 0;
+}
+

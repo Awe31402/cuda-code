@@ -16,10 +16,16 @@
 | --- | --- | --- | --- |
 | chapter1 | `ch01/` | 6 CUDA + 4 shell + 2 Python | 全數可編譯／執行 |
 | chapter2 | `ch02/` | 10 原文 + 2 修正版 | 10 可執行，2 個原文檔在 CUDA 12 編不過（見下） |
-| chapter3~12 | `ch03/`~`ch12/` | 74 CUDA/C++ + 4 Python | 71 編譯 OK、3 缺 MPI header 跳過；Python 2 可跑、2 缺 numba |
+| chapter3~12 | `ch03/`~`ch12/` | 74 CUDA/C++ + 4 Python | 74 全數編譯 OK；Python 2 可跑、2 缺 numba |
 
-合計 **87 支可執行檔**，實測 **85 支正常結束**，另 2 支因為本機只有單張 GPU 而主動報錯離開
-（`ch04_06_matrix_add`、`ch12_07_compute_forces`，兩者都要求 ≥2 GPU）。
+合計 **91 支可執行檔**（含 4 支修正版），實測 **89 支正常結束**，另 2 支因為本機只有單張 GPU
+而主動報錯離開（`ch04_06_matrix_add`、`ch12_07_compute_forces`，兩者都要求 ≥2 GPU）。
+
+MPI 程式要用 `mpirun` 啟動：
+
+```bash
+cd bin && mpirun -np 2 ./ch11_05_matrix_multiply_kernel
+```
 
 ## 編譯與執行
 
@@ -98,7 +104,9 @@ ch12 分子動力學案例。
 | --- | --- |
 | `ch08/08_block_prefix_sum.cu` | 原文執行後印 **"Error in prefix sum computation."**，是真的算錯（見下） |
 | `ch08/08_block_prefix_sum_fixed.cu` | 修正版，驗證通過（最後一項 = 1048576） |
-| `ch11/05`, `ch11/06`, `ch12/08` | 需要 MPI，本機缺 `mpi.h` 而 **SKIP** |
+| `ch11/05`, `ch11/06` | 需要 MPI，`mpirun -np 2` 執行正常 |
+| `ch12/08_compute_forces.cu` | 需要 MPI，可執行但**結果隨 rank 數改變**（np=2 的力約為 np=1 的一半，見下） |
+| `ch12/08_compute_forces_fixed.cu` | 修正版，np=1/2/4 結果完全一致 |
 | `ch11/01`, `ch11/02` | 需要 `numba`，本機未安裝 |
 | `ch04/06_matrix_add.cu`, `ch12/07_compute_forces.cu` | 需要 ≥2 GPU，單卡環境下程式自己報錯離開 |
 | `ch10/07_matrix_vector_product.cu` | 共軛梯度法跑滿 1000 次迭代才停，可正常收斂輸出 |
@@ -128,12 +136,20 @@ ch12 分子動力學案例。
 8. **`ch11/03`、`ch11/04` 的 cupy 型別不符**。原文用 `np.random.rand`（float64）餵給宣告成
    `float32` 的 `ElementwiseKernel`，執行時丟 `TypeError: Type is mismatched. a float64 float32`，
    加 `.astype(np.float32)` 修正。
+9. **`ch12/08` 的 MPI 分解不成立**。原文每個 rank 只配置並計算自己那份粒子，
+   rank 之間完全不交換座標，所以每顆粒子只感受到 `1/worldSize` 的鄰居——實測 np=2 的受力
+   約為 np=1 的一半。另外每個 rank 都用未 `srand` 的 `rand()`，序列相同 → 所有 rank 拿到
+   **同一批**座標，`MPI_Gather` 收回來的是重複資料；`cudaSetDevice(worldRank)` 也沒檢查回傳值
+   （單 GPU 時 rank 1 拿到 `cudaErrorInvalidDevice` 後靜默沿用 device 0）。
+   `_fixed` 版改成 rank 0 產生座標後 `MPI_Bcast`，每個 rank 對**全域**座標算自己那段的受力，
+   並依實際 GPU 數取模設定裝置。np=1/2/4 結果完全一致，且全部受力分量總和 ≈ 0
+   （相對於 1e4 的量級），符合牛頓第三定律內力互相抵銷。
 
-## 本機環境缺的東西（非程式問題）
+## 環境相依的注意事項
 
-- **MPI header**：`ch11/05`、`ch11/06`、`ch12/08` 需要 `mpi.h`。本機 `libopenmpi-dev` 雖在 dpkg
-  裡有登記，但檔案實際不存在（`mpicc` 回報的 include 路徑是空的）。補上即可編譯：
-  `sudo apt install --reinstall libopenmpi-dev`，之後 `build_all.sh` 會自動帶入 mpicc 的旗標。
+- **MPI**：本機原本沒有 `libopenmpi-dev`（dpkg 只剩移除後的殘留設定），已安裝。
+  過程中 `libhwloc15` 從 `2.7.0-2ubuntu1` 降版到倉庫的 `2.7.0-2`（`libhwloc-dev` 要求版本完全相符），
+  上游同為 hwloc 2.7.0、soname 未變，且沒有任何套件被移除。
 - **numba**：`ch11/01`、`ch11/02` 需要，`pip install numba` 即可（`mpi4py`、`cupy`、`numpy` 都已具備）。
 - **第二張 GPU**：`ch04/06`、`ch12/07` 會偵測 GPU 數量並主動報錯離開。
 

@@ -1,0 +1,4 @@
+# 編譯出來的執行檔（用 make 重建）
+01_device_query
+02_warp_blocksize
+03_context_compare

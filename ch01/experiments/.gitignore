@@ -2,3 +2,4 @@
 01_device_query
 02_warp_blocksize
 03_context_compare
+05_gpu_load

@@ -6,16 +6,22 @@
 
 ```bash
 cd ch01/experiments
-make run          # 編譯並依序執行三支
+make run          # 問答一、二題的實驗（01~03，很快）
+make run-tools    # 問答三、四、五題的實驗（04/06/07，06 會加負載約一分鐘）
+make run-all      # 全部
 ```
 
 或分開來：
 
 ```bash
-make              # 只編譯
+make                        # 編譯 .cu，並把 .sh 設為可執行
 ./01_device_query
 ./02_warp_blocksize
 ./03_context_compare
+./04_nvcc_pipeline.sh
+./06_pstate_monitor.sh
+./07_nvidia_smi_query.sh
+SHOW_LOAD=1 ./07_nvidia_smi_query.sh   # 開背景負載，數字比較好看
 make clean
 ```
 
@@ -32,6 +38,10 @@ make ARCH=sm_86   # 例如 RTX 30 系列
 | [01_device_query.cu](01_device_query.cu) | 第 1 題 | 抓本機真實硬體規格：SM 數、warpSize、每 SM 上限。順便算出不同 blockDim 的 occupancy |
 | [02_warp_blocksize.cu](02_warp_blocksize.cu) | 第 1-3 題 | warp 沒填滿 32 個 thread 會慢多少 |
 | [03_context_compare.cu](03_context_compare.cu) | 第 2-3 題 | `cuCtxCreate` 建的 context 與 Runtime API 的 primary context 是**不同**的東西；並釐清「跨 context 指標不能用」這個常見誤解 |
+| [04_nvcc_pipeline.sh](04_nvcc_pipeline.sh) | 第 3 題 | nvcc 的每個編譯階段、PTX vs SASS、多架構 fatbin、JIT fallback 成功與失敗 |
+| [05_gpu_load.cu](05_gpu_load.cu) | 第 4 題 | 可控的 GPU 負載產生器（工作集大小可調），給 06 觀測用 |
+| [06_pstate_monitor.sh](06_pstate_monitor.sh) | 第 4 題 | P-State 隨負載動態變化的即時取樣，含降頻原因 |
+| [07_nvidia_smi_query.sh](07_nvidia_smi_query.sh) | 第 5 題 | nvidia-smi 各種查詢寫法，重點是 GPU0 的功耗與記憶體 |
 
 ## 02 的實驗設計（重點是控制變因）
 
@@ -86,6 +96,40 @@ block    warps   lane槽  lane效率  ms         vs 64
 ### 03 需要額外連結 -lcuda
 
 Driver API 在 `libcuda`，由**顯示卡驅動**安裝，不在 CUDA Toolkit 裡。Makefile 已經處理好了。
+
+## 04 的重點：兩個決定部署成敗的實驗
+
+```
+=== 6) 只留 PTX，能在本機（sm_89）上跑嗎？ ===
+  內容：PTX file 1: d_ptxonly.1.sm_75.ptx （沒有任何 cubin）
+  執行 -> kernel result: no error
+  => 成功。驅動把 PTX 即時編譯（JIT）成 sm_89 的 SASS。
+
+=== 7) 只留舊架構 SASS、不留 PTX，會怎樣？ ===
+  內容：只有 sm_75 的 cubin，沒有 PTX
+  執行 -> kernel result: no kernel image is available for execution on the device
+```
+
+結論：**清單裡最高那個架構一定要多留一行 `code=compute_XX`（PTX）**，否則未知的新卡沒有 JIT 退路，直接跑不起來。
+
+## 06 的重點：P0 不等於最高時脈
+
+| | SM 時脈 | 記憶體時脈 | 功耗 | 溫度 |
+|---|---|---|---|---|
+| 閒置 P5 | **2475 MHz** | 810 MHz | 17.6 W | 63°C |
+| 負載 P0 | **~1950 MHz** | 8001 MHz | 45 W | 74°C |
+| 硬體上限 | 3105 MHz | 8001 MHz | 115 W | — |
+
+P0 的 SM 時脈**反而比閒置低 500 MHz**，兩者都沒到 3105 MHz 上限。腳本第 3 段抓到原因：
+
+```
+Performance State   : P0
+    SW Power Cap    : Active      ← 被功耗預算限制住
+```
+
+所以 P0 的意思是「允許用到最高效能狀態」，不是「保證跑在最高時脈」。真正被拉上去的是記憶體時脈（810 → 8001 MHz，10 倍）。
+
+另外，持續負載下狀態會在 P0/P3/P4 之間震盪，記憶體時脈跟著 8001/7001/6001 降階 —— **單次 `nvidia-smi` 讀數不能代表穩態**。
 
 ## 本機環境
 

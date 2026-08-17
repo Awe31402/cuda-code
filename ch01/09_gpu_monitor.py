@@ -2,6 +2,7 @@
 
 注意：set_power_limit 需要 root 权限；monitor_and_optimize 是无限循环。
 """
+import shlex
 import subprocess
 import time
 def run_command(command):
@@ -23,6 +24,7 @@ def query_gpu_status():
     """
     print("查询 GPU 状态中...")
     command = ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,temperature.gpu,power.draw,power.limit", "--format=csv,noheader,nounits"]
+    print(shlex.join(command))
     output = run_command(command)
     if output:
         print("当前 GPU 状态:")
@@ -66,13 +68,13 @@ def monitor_and_optimize(gpu_index, max_temp=75):
             set_power_limit(gpu_index, 100)  # 设置较低功耗限制
         else:
             print(f"温度正常 ({temp}°C)，恢复默认功耗限制...")
-            set_power_limit(gpu_index, 250)  # 恢复默认功耗限制
+            set_power_limit(gpu_index, 140)  # 恢复默认功耗限制
         time.sleep(5)  # 每 5 秒监控一次
 if __name__ == "__main__":
     print("==== GPU 状态查询与优化工具 ====")
     query_gpu_status()
     # 设置功耗限制示例
     gpu_index = 0  # 假设目标 GPU 为索引 0
-    set_power_limit(gpu_index, 200)
+    set_power_limit(gpu_index, 100)
     # 开始动态监控和优化
     monitor_and_optimize(gpu_index)

@@ -1,2 +1,5 @@
 bin
 build_logs
+
+# 編輯器產生的 tags 檔
+.vscode-ctags
